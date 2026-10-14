@@ -8,11 +8,13 @@ import hashlib
 import json
 import re
 import sys
+import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from job_store import save_plan_job
 from prepare_tts_text import prepare_text, spoken_product_grade
 from subtitle_timing import split_timeline_segments, visible_subtitle_segments
 from video_constants import FOOTER_CAPTIONS, shot_image_paths
@@ -59,13 +61,35 @@ def canonical_spoken_display(value: Any) -> str:
     return text
 
 
-def validate_ai_image_prompt(label: str, value: Any) -> None:
+# The mandatory visual constraints are fixed boilerplate. `--complete-prompts`
+# appends exactly these clauses, so an agent never hand-edits a dozen prompts.
+PROMPT_COMPOSITION_CLAUSE = "14:10 horizontal composition"
+PROMPT_PEOPLE_CLAUSE = (
+    "any people shown are Chinese people only, no foreign, Western, mixed-ethnicity, or ambiguous faces"
+)
+PROMPT_PELLET_CLAUSE = (
+    "plastic raw material, if shown, consists only of white semi-transparent plastic pellets, "
+    "no colored, black, or opaque pellets, no powder, flakes, sheets, or film"
+)
+PROMPT_FACTORY_CLAUSE = (
+    "wide-angle photorealistic factory floor, real industrial production environment, "
+    "full spatial context, no close-up, no macro shot, no studio scene"
+)
+PEOPLE_PROHIBITIONS = ("foreign", "western", "mixed-ethnicity", "ambiguous face")
+FACTORY_REQUIREMENTS = ("wide-angle", "real industrial", "no close-up")
+
+
+def ai_image_prompt_problems(label: str, value: Any) -> list[tuple[str, str]]:
+    """Return every (message, clause that fixes it) for one prompt."""
     prompt = str(value or "").strip()
     if not prompt:
-        raise ValueError(f"{label} image_prompt is required")
+        return [(f"{label} image_prompt is required", "")]
     normalized = prompt.casefold()
-    if "14:10 horizontal composition" not in normalized:
-        raise ValueError(f"{label} image_prompt must require 14:10 horizontal composition")
+    problems: list[tuple[str, str]] = []
+    if PROMPT_COMPOSITION_CLAUSE not in normalized:
+        problems.append(
+            (f"{label} image_prompt must require 14:10 horizontal composition", PROMPT_COMPOSITION_CLAUSE)
+        )
 
     # Negated descriptions such as "no people" are constraints, not a request
     # to render people and must not trigger the Chinese-only face requirement.
@@ -78,36 +102,132 @@ def validate_ai_image_prompt(label: str, value: Any) -> None:
     if any(term in person_context for term in person_terms):
         matched = next(term for term in person_terms if term in person_context)
         if "chinese" not in normalized or "only" not in normalized:
-            raise ValueError(
+            problems.append((
                 f'{label} mentions "{matched}", so it must also require "Chinese people only" '
-                f'for the people it shows; add that phrase (or remove the people) and revalidate'
-            )
-        if any(term in normalized for term in ("foreign", "western", "mixed-ethnicity", "ambiguous face")):
-            raise ValueError(
-                f'{label} shows people, so it must prohibit "foreign", "western", '
-                f'"mixed-ethnicity", and "ambiguous face" explicitly'
-            )
+                f'for the people it shows',
+                PROMPT_PEOPLE_CLAUSE,
+            ))
+        else:
+            missing = [term for term in PEOPLE_PROHIBITIONS if term not in normalized]
+            if missing:
+                problems.append((
+                    f"{label} shows people, so it must explicitly prohibit "
+                    + ", ".join(f'"{term}"' for term in missing),
+                    PROMPT_PEOPLE_CLAUSE,
+                ))
 
     if any(term in normalized for term in ("plastic raw material", "resin", "pellet")):
         matched = next(term for term in ("plastic raw material", "resin", "pellet") if term in normalized)
         if "white semi-transparent plastic pellets" not in normalized:
-            raise ValueError(
+            problems.append((
                 f'{label} mentions "{matched}", so it must also require '
                 f'"white semi-transparent plastic pellets" verbatim and forbid colored, black, or '
-                f'opaque pellets, powder, flakes, sheets, and film'
-            )
+                f'opaque pellets, powder, flakes, sheets, and film',
+                PROMPT_PELLET_CLAUSE,
+            ))
 
     if any(term in normalized for term in ("factory", "production site", "production line", "factory floor")):
-        required = ("wide-angle", "real industrial", "no close-up")
         triggers = ("production site", "production line", "factory floor", "factory")
         matched = next(term for term in triggers if term in normalized)
-        missing = [term for term in required if term not in normalized]
+        missing = [term for term in FACTORY_REQUIREMENTS if term not in normalized]
         if missing:
-            raise ValueError(
+            problems.append((
                 f'{label} mentions "{matched}", so it must also contain '
-                + ", ".join(f'"{term}"' for term in missing)
-                + "; add the missing phrase(s) verbatim and revalidate"
+                + ", ".join(f'"{term}"' for term in missing),
+                PROMPT_FACTORY_CLAUSE,
+            ))
+    return problems
+
+
+def validate_ai_image_prompt(label: str, value: Any) -> None:
+    problems = ai_image_prompt_problems(label, value)
+    if problems:
+        raise ValueError(problems[0][0])
+
+
+def complete_ai_image_prompt(value: Any) -> str:
+    """Append the fixed mandatory clauses a prompt is missing; idempotent."""
+    prompt = str(value or "").strip()
+    if not prompt:
+        return prompt
+    for _ in range(3):  # an added clause can introduce a new trigger word
+        clauses = [clause for _message, clause in ai_image_prompt_problems("prompt", prompt) if clause]
+        if not clauses:
+            break
+        for clause in dict.fromkeys(clauses):
+            if clause == PROMPT_COMPOSITION_CLAUSE:
+                prompt = f"{clause}, {prompt}"
+            else:
+                prompt = f"{prompt.rstrip(' ,.;')}, {clause}"
+    return prompt
+
+
+def job_ai_image_prompts(job: dict[str, Any]) -> list[tuple[str, dict[str, Any], str | int]]:
+    """List (label, owner, key) for every AI image prompt in shot and closing order."""
+    entries: list[tuple[str, dict[str, Any], str | int]] = []
+    for position, shot in enumerate(job.get("shots") or [], start=1):
+        if not isinstance(shot, dict) or shot.get("visual_type") != "ai_image":
+            continue
+        prompts = shot.get("image_prompts")
+        if isinstance(prompts, list):
+            index = shot.get("index", position)
+            entries.extend(
+                (f"shot {index} image_prompts[{variant}]", shot, variant - 1)
+                for variant in range(1, len(prompts) + 1)
             )
+    for position, visual in enumerate(job.get("closing_visuals") or [], start=1):
+        if isinstance(visual, dict):
+            entries.append((f"closing_visual {position}", visual, "image_prompt"))
+    return entries
+
+
+def prompt_value(owner: dict[str, Any], key: str | int) -> Any:
+    return owner["image_prompts"][key] if isinstance(key, int) else owner.get(key)
+
+
+def require_ai_image_prompts(job: dict[str, Any]) -> None:
+    """Report every non-compliant prompt at once instead of one per run."""
+    messages = [
+        message
+        for label, owner, key in job_ai_image_prompts(job)
+        for message, _clause in ai_image_prompt_problems(label, prompt_value(owner, key))
+    ]
+    if messages:
+        raise ValueError(
+            f"{len(messages)} image prompt problem(s):\n- " + "\n- ".join(messages)
+            + "\nRun `uv run python scripts\\validate_video_job.py output\\<job-id> --complete-prompts` "
+            "to append the mandatory constraint clauses automatically, then revalidate."
+        )
+
+
+def complete_job_prompts(job_path: Path) -> dict[str, Any]:
+    """Append missing mandatory clauses to non-compliant prompts, then validate.
+
+    Prompts are not part of the sealed copy approval, so this never needs a
+    new human approval. Compliant prompts are left byte-identical, so images
+    already generated from them keep their request hash and are not re-paid.
+    """
+    try:
+        job = json.loads(job_path.read_text(encoding="utf-8-sig"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON at {job_path}: {exc}") from exc
+    if not isinstance(job, dict):
+        raise ValueError("video-job.json root must be an object")
+    completed: list[str] = []
+    for label, owner, key in job_ai_image_prompts(job):
+        current = prompt_value(owner, key)
+        updated = complete_ai_image_prompt(current)
+        if updated != str(current or "").strip() and updated:
+            if isinstance(key, int):
+                owner["image_prompts"][key] = updated
+            else:
+                owner[key] = updated
+            completed.append(label)
+    if completed:
+        save_job(job_path, job)
+    result = validate(job_path)
+    result["completed_prompts"] = completed
+    return result
 
 
 def inside_job(job_dir: Path, value: Any, label: str) -> None:
@@ -199,11 +319,8 @@ def media_generation_started(job: dict[str, Any]) -> bool:
 
 
 def save_job(job_path: Path, job: dict[str, Any]) -> None:
-    temporary_path = job_path.with_suffix(".json.tmp")
-    temporary_path.write_text(
-        json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    temporary_path.replace(job_path)
+    """Plan-side write; keeps fields the image stage wrote meanwhile."""
+    save_plan_job(job_path, job)
 
 
 def seal_copy_approval(job_path: Path) -> dict[str, Any]:
@@ -357,6 +474,36 @@ def require_full_grade_reference(product_grade: str, value: Any, label: str) -> 
         )
 
 
+def comparable_table_text(value: Any) -> str:
+    """Compare table text ignoring spacing and full-width/half-width forms."""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(value or ""))).casefold()
+
+
+def require_table_values_in_article(shots: list[Any], article_text: str) -> None:
+    """Every numeric table cell must be copied from the article.
+
+    Parameter names may be lightly normalized, but a number, range or unit
+    shown on screen is a factual claim and must exist in the source verbatim.
+    All offending cells are reported in one message.
+    """
+    article = comparable_table_text(article_text)
+    missing: list[str] = []
+    for shot in shots:
+        if not isinstance(shot, dict) or shot.get("visual_type") != "data_table":
+            continue
+        table = shot.get("table") if isinstance(shot.get("table"), dict) else {}
+        for row_number, row in enumerate(table.get("rows") or [], start=1):
+            for column_number, cell in enumerate(row if isinstance(row, list) else [], start=1):
+                text = str(cell).strip()
+                if re.search(r"\d", text) and comparable_table_text(text) not in article:
+                    missing.append(f'shot {shot.get("index")} table.rows[{row_number}][{column_number}] "{text}"')
+    if missing:
+        raise ValueError(
+            "data_table values must be copied exactly from article.json body_text; not found in the article:\n- "
+            + "\n- ".join(missing)
+        )
+
+
 def require_article_order(article_text: str, shots: list[dict[str, Any]]) -> None:
     """Require shots to consume the source article in the order it is written.
 
@@ -460,6 +607,7 @@ def validate(job_path: Path) -> dict[str, Any]:
     if str(job.get("product_grade") or "").strip() == "":
         raise ValueError("product_grade is required")
     require_title_candidates(job)
+    require_ai_image_prompts(job)
     audio = job.get("audio")
     if not isinstance(audio, dict):
         raise ValueError("audio configuration is required")
@@ -617,6 +765,8 @@ def validate(job_path: Path) -> dict[str, Any]:
             if shot.get("table_path") is not None:
                 inside_job(job_dir, shot["table_path"], f"shot {index} table_path")
 
+    require_table_values_in_article(job["shots"], article_text)
+
     require_article_order(article_text, job["shots"])
 
     require_shot_budget(job)
@@ -720,16 +870,25 @@ def main() -> int:
         action="store_true",
         help="Clear generated audio after an approved copy revision and before resealing",
     )
+    parser.add_argument(
+        "--complete-prompts",
+        action="store_true",
+        help="Append the mandatory constraint clauses to non-compliant image prompts, then validate",
+    )
     args = parser.parse_args()
     job_path = args.job / "video-job.json" if args.job.is_dir() else args.job
     try:
         resolved = job_path.resolve()
-        if sum((args.seal_approval, args.reset_audio_for_reapproval)) > 1:
-            raise ValueError("--seal-approval and --reset-audio-for-reapproval are mutually exclusive")
+        if sum((args.seal_approval, args.reset_audio_for_reapproval, args.complete_prompts)) > 1:
+            raise ValueError(
+                "--seal-approval, --reset-audio-for-reapproval and --complete-prompts are mutually exclusive"
+            )
         if args.seal_approval:
             result = seal_copy_approval(resolved)
         elif args.reset_audio_for_reapproval:
             result = reset_audio_for_reapproval(resolved)
+        elif args.complete_prompts:
+            result = complete_job_prompts(resolved)
         else:
             result = validate(resolved)
         print(json.dumps(result, ensure_ascii=False))

@@ -24,7 +24,6 @@ from article_to_approval import (
     remove_duplicate_shot_blocks,
     classify_overlap,
     OverlapKind,
-    refresh_approved_snapshot,
     shot_budget_warning,
     table_capacity_warning,
     table_parameter_warnings,
@@ -76,20 +75,59 @@ class ApprovalSubtitleTests(unittest.TestCase):
         self.assertIs(classify_overlap("相同内容", "相同内容"), OverlapKind.EXACT)
         self.assertIs(classify_overlap("不同事实一", "不同事实二"), OverlapKind.DISTINCT)
 
-    def test_refreshes_sealed_hashes_after_automatic_adjustment(self):
+    def test_never_rewrites_or_reseals_human_approved_copy(self):
+        copy = "### 镜头1\n\n口播：流动性好，适合薄壁成型。\n\n### 镜头2\n\n口播：流动性好，适合薄壁成型。\n"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             copy_path = root / "copy-for-approval.md"
-            subtitle_path = root / "subtitle-for-approval.md"
-            job_path = root / "video-job.json"
-            copy_path.write_text("修订后的文案", encoding="utf-8")
-            subtitle_path.write_text("修订后的字幕", encoding="utf-8")
-            job_path.write_text(json.dumps({"copy_approval": {"status": "approved"}}), encoding="utf-8")
-            refresh_approved_snapshot(job_path, copy_path, subtitle_path, [6])
-            approval = json.loads(job_path.read_text(encoding="utf-8"))["copy_approval"]
-            self.assertRegex(approval["copy_sha256"], r"^[0-9a-f]{64}$")
-            self.assertRegex(approval["subtitle_sha256"], r"^[0-9a-f]{64}$")
-            self.assertEqual(approval["automatic_adjustments"][0]["removed_shots"], [6])
+            copy_path.write_text(copy, encoding="utf-8")
+            article_path = root / "article.json"
+            article_path.write_text(json.dumps({"title": "t", "body_text": "流动性好"}, ensure_ascii=False), encoding="utf-8")
+            approval = {"status": "approved", "copy_sha256": "old", "subtitle_sha256": "old"}
+            (root / "video-job.json").write_text(json.dumps({"copy_approval": approval}), encoding="utf-8")
+            argv = sys.argv
+            sys.argv = ["article_to_approval.py", str(article_path), "--output-dir", str(root), "--product-grade", "PP Z30S"]
+            try:
+                with self.assertRaisesRegex(ValueError, "重新提交人工审批"):
+                    approval_main()
+            finally:
+                sys.argv = argv
+            self.assertEqual(copy_path.read_text(encoding="utf-8"), copy)
+            saved = json.loads((root / "video-job.json").read_text(encoding="utf-8"))["copy_approval"]
+            self.assertEqual(saved["copy_sha256"], "old")
+
+    def test_distinct_facts_after_the_same_grade_are_not_duplicates(self):
+        copy = (
+            "### 镜头1\n做餐盒的老板看过来，这款PP Z30S透明度高。\n"
+            "### 镜头2\n这款PP Z30S耐热性好，能进微波炉。\n"
+            "### 镜头3\n这款PP Z30S刚性好，薄壁不变形。\n"
+            "### 镜头4\n这款PP Z30S流动性好，适合薄壁注塑。\n"
+        )
+        adjusted, shots, removed = remove_duplicate_shot_blocks(copy)
+        self.assertEqual(removed, [])
+        self.assertEqual(len(shots), 4)
+        self.assertEqual(adjusted, copy)
+
+    def test_removing_a_duplicate_keeps_every_heading_on_its_own_line(self):
+        copy = (
+            "### 镜头1\n这款PP Z30S透明度高。\n"
+            "### 镜头2\n这款PP Z30S透明度高。\n"
+            "### 镜头3（应用）\n适合做餐盒。\n"
+        )
+        adjusted, shots, removed = remove_duplicate_shot_blocks(copy)
+        self.assertEqual(removed, [2])
+        self.assertEqual(adjusted, "### 镜头1\n这款PP Z30S透明度高。\n### 镜头2（应用）\n适合做餐盒。\n")
+        self.assertEqual(shot_narrations(adjusted), [(1, "这款PP Z30S透明度高。"), (2, "适合做餐盒。")])
+
+    def test_narration_wrapped_over_several_lines_is_read_whole(self):
+        copy = "### 镜头1\n口播：做餐盒的老板看过来，PP Z30S透明度高，\n刚性也好，薄壁不容易变形。\n\n证据：P3\n"
+        self.assertEqual(shot_narrations(copy), [(1, "做餐盒的老板看过来，PP Z30S透明度高，刚性也好，薄壁不容易变形。")])
+        latin = "### 镜头1\n熔指约 20 g/10min，适合\nPP 注塑。\n- 备注\n"
+        self.assertEqual(shot_narrations(latin), [(1, "熔指约 20 g/10min，适合PP 注塑。")])
+
+    def test_markdown_separator_rows_are_not_counted_as_parameters(self):
+        rows = "\n".join(f"| 参数{i} | 约{i} MPa |" for i in range(1, 16))
+        self.assertIsNone(table_capacity_warning("| 项目 | 数值 |\n|---|---|\n" + rows))
 
     def test_rejects_duplicate_shot_copy(self):
         with self.assertRaisesRegex(ValueError, "镜头1与镜头2文案重复"):

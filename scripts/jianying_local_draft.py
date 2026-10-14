@@ -19,6 +19,7 @@ from typing import Any
 from pymediainfo import MediaInfo
 import imageio_ffmpeg
 from apply_logo import apply_logo
+from job_store import save_plan_job, save_whole_job
 from subtitle_timing import (
     display_text,
     display_width_units,
@@ -26,7 +27,7 @@ from subtitle_timing import (
     visible_subtitle_segments,
 )
 from validate_video_job import timeline_audio_hash, validate
-from video_constants import shot_image_paths
+from video_constants import FOOTER_CAPTIONS, LOGO_RENDER_VERSION, shot_image_paths
 
 
 JY_VENDOR_ROOT = Path(__file__).resolve().parent / "jianying_editor" / "scripts" / "vendor"
@@ -39,7 +40,6 @@ TEMPLATE_SUBTITLE_SIZE = 9.0
 TEMPLATE_SUBTITLE_BORDER_WIDTH = 55.0
 TEMPLATE_SUBTITLE_FILL = (0.949, 0.918, 0.855)  # #F2EADD
 TEMPLATE_SUBTITLE_OUTLINE = (0.294, 0.294, 0.271)  # #4B4B45
-SUBTITLE_MAX_WIDTH_UNITS = 17.0
 # HeaderGrade is an independent template text layer. The draft library stores
 # Jianying inspector Y coordinates as a full-canvas pixel value divided by
 # 1920, so inspector Y=-1353 becomes -1353 / 1920.
@@ -64,18 +64,9 @@ CLEAR_VIDEO_FRAME = (0, 588, 1080, 1359)
 GRADE_REGION = (105, 1535, 975, 1755)
 SUBTITLE_Y = 1305
 TRANSITION_SEQUENCE = ("叠化", "向上擦除", "向左擦除", "滑动", "闪白_II")
-FOOTER_SUBTITLE_TEMPLATES = (
-    "买优质塑化原料",
-    "就找兆企供应链",
-    "兆企供应链管理有限公司深耕塑化行业",
-    "货源稳定 物流高效",
-    "找兆企采购{product_grade}",
-    "让生产更顺畅",
-    "本视频禁止用于ai模型训练",
-    "兆企供应链拥有最终解释权",
-)
+# Kept as a name for existing callers; the captions live in video_constants.
+FOOTER_SUBTITLE_TEMPLATES = FOOTER_CAPTIONS
 CLOSING_VISUAL_COUNT = 2
-LOGO_RENDER_VERSION = b"direct-source-logo-v7"
 
 
 def transition_for_boundary(draft: Any, boundary_index: int) -> Any:
@@ -237,6 +228,9 @@ def split_subtitle_timing(
     return list(zip(sentences, allocated))
 
 
+MIN_PAUSE_FRAMES = 4  # 80 ms of low energy at 20 ms per frame
+
+
 def waveform_pause_timing(
     text: str, duration_us: int, audio_path: Path, *, spoken_text: str | None = None
 ) -> list[tuple[str, int]] | None:
@@ -262,7 +256,18 @@ def waveform_pause_timing(
             return None
         floor = sorted(energy)[max(0, len(energy) // 10)]
         threshold = max(180.0, floor * 1.8)
-        pauses = [index * 20_000 for index, value in enumerate(energy) if value <= threshold]
+        # A single quiet 20 ms frame is just the dip between two syllables.
+        # Only a sustained run is a spoken pause; snap to its centre.
+        pauses: list[int] = []
+        run_start: int | None = None
+        for index, value in enumerate([*energy, threshold + 1]):
+            if value <= threshold:
+                if run_start is None:
+                    run_start = index
+                continue
+            if run_start is not None and index - run_start >= MIN_PAUSE_FRAMES:
+                pauses.append((run_start + index) * 20_000 // 2)
+            run_start = None
         if not pauses:
             return None
         spoken_sentences = split_timeline_segments(spoken_text or text)
@@ -574,11 +579,7 @@ def prepare_closing_visuals(
 
 def subtitle_display_text(text: str) -> str:
     """Remove sentence punctuation while preserving numeric separators."""
-    # Decimal points and thousands separators are technical data, not sentence
-    # punctuation. Keep them when both neighboring characters are digits.
-    text = text.replace("、", " ")
-    text = re.sub(r"(?<!\d)[.,]|[.,](?!\d)", "", text)
-    return re.sub(r"[，、；：。！？!?；:：…（）()【】\[\]“”‘’\"'、·]", "", text).strip()
+    return display_text(text)
 
 
 def load_job(job_dir: Path) -> tuple[Path, dict[str, Any]]:
@@ -593,11 +594,8 @@ def load_job(job_dir: Path) -> tuple[Path, dict[str, Any]]:
 
 
 def save_job(job_path: Path, job: dict[str, Any]) -> None:
-    temporary_path = job_path.with_suffix(".json.tmp")
-    temporary_path.write_text(
-        json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    os.replace(temporary_path, job_path)
+    """Draft-stage write: runs after media finished, so it owns the whole plan."""
+    save_whole_job(job_path, job)
 
 
 def _stat_signature(path: Path) -> dict[str, Any]:
@@ -797,7 +795,8 @@ def verify_duration(job_dir: Path) -> dict[str, Any]:
     job["actual_total_duration_seconds"] = round(total_seconds, 6)
     job["actual_timeline_audio_hash"] = timeline_audio_hash(job)
     job["actual_duration_status"] = "verified"
-    save_job(job_path, job)
+    # --verify-duration may run while images are still being generated.
+    save_plan_job(job_path, job)
     return timing
 
 
@@ -899,6 +898,22 @@ def check_jianying_version() -> str | None:
             "Unset JY_STRICT_VERSION_CHECK to attempt creating a new draft."
         )
     return version
+
+
+JIANYING_PROCESS_NAMES = ("JianyingPro.exe", "CapCut.exe")
+
+
+def jianying_is_running() -> bool:
+    """Report whether the Jianying editor process is alive (Windows only)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        listing = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, errors="replace", timeout=15
+        ).stdout.casefold()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return any(f'"{name.casefold()}"' in listing for name in JIANYING_PROCESS_NAMES)
 
 
 def next_available_project_name(drafts_root: Path, base_name: str) -> str:
@@ -1124,6 +1139,12 @@ def create_draft(job_dir: Path, overwrite: bool = False) -> dict[str, Any]:
     if project_name != requested_project_name:
         retry_of_draft_path = str(drafts_root / requested_project_name)
     draft_path = drafts_root / project_name
+    if (overwrite or is_resuming) and draft_path.is_dir() and jianying_is_running():
+        # An open editor rewrites draft_content.json on save and would silently
+        # replace the rebuilt timeline, so refuse instead of racing it.
+        raise RuntimeError(
+            "剪映正在运行，覆盖已有草稿前请先完全退出剪映（含托盘进程），再重新执行本命令"
+        )
     draft_backup_path = (
         snapshot_draft_folder(draft_path, job_dir) if (overwrite or is_resuming) else None
     )

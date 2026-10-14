@@ -4,11 +4,9 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
-from datetime import datetime, timezone
 from pathlib import Path
 from enum import Enum
 from typing import Any
@@ -37,63 +35,64 @@ def atomic_write(path: Path, content: str) -> None:
     os.replace(temporary, path)
 
 
-def file_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def require_unapproved_copy(job_path: Path, removed_shots: list[int]) -> None:
+    """Refuse to rewrite copy a human has already approved.
 
-
-def refresh_approved_snapshot(job_path: Path, copy_path: Path, subtitle_path: Path, removed_shots: list[int]) -> None:
-    """Atomically refresh a sealed approval after a mechanical duplicate removal."""
+    Removing a duplicate shot changes approved wording, so it needs a fresh
+    human approval and a new seal; it must never re-sign the snapshot itself.
+    """
+    if not job_path.is_file():
+        return
     job = json.loads(job_path.read_text(encoding="utf-8-sig"))
     approval = job.get("copy_approval") if isinstance(job, dict) else None
-    if not isinstance(approval, dict) or approval.get("status") != "approved":
-        return
-    shots = job.get("shots", [])
-    draft = job.get("draft")
-    media_started = any(
-        isinstance(shot, dict)
-        and (shot.get("audio_hash") or shot.get("logo_source_hash")
-             or str(shot.get("image_status", "planned")) not in {"planned", "pending"}
-             or str(shot.get("audio_status", "planned")) not in {"planned", "pending"})
-        for shot in shots
-    ) or (isinstance(draft, dict) and str(draft.get("status", "not_started")) not in {"not_started", "planned", "stale_audio", "stale_subtitles"})
-    if media_started:
-        raise ValueError("媒体生成已开始，不能自动修改已审批文案")
-    approval["copy_sha256"] = file_sha256(copy_path)
-    approval["subtitle_sha256"] = file_sha256(subtitle_path)
-    approval["approved_at"] = datetime.now(timezone.utc).isoformat()
-    history = approval.setdefault("automatic_adjustments", [])
-    if not isinstance(history, list):
-        raise ValueError("copy_approval.automatic_adjustments must be an array")
-    history.append(
-        {
-            "kind": "removed_exact_duplicate_shots",
-            "removed_shots": removed_shots,
-            "at": approval["approved_at"],
-        }
-    )
-    temporary = job_path.with_suffix(".json.tmp")
-    temporary.write_text(json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, job_path)
+    if isinstance(approval, dict) and approval.get("status") == "approved":
+        raise ValueError(
+            f"已审批的文案中镜头 {', '.join(map(str, removed_shots))} 与前面的镜头重复；"
+            "请修订 copy-for-approval.md 并重新提交人工审批，不能自动改写已审批文案"
+        )
+
+
+NARRATION_METADATA_PREFIXES = ("证据：", "文章依据：", "文章证据：", "数据表", "---", "字幕分段")
+NARRATION_MARKUP_PREFIXES = ("- ", "**", "##", "#")
+
+
+def _join_narration_lines(lines: list[str]) -> str:
+    """Join a wrapped Markdown paragraph; Chinese lines join without a space."""
+    text = lines[0]
+    for line in lines[1:]:
+        latin_boundary = text[-1:].isascii() and text[-1:].isalnum() and line[:1].isascii() and line[:1].isalnum()
+        text += (" " if latin_boundary else "") + line
+    return text
 
 
 def shot_narrations(copy: str) -> list[tuple[int, str]]:
+    """Read each shot's narration: the first paragraph under its heading.
+
+    A paragraph may wrap over several lines; every line up to the next blank
+    line or metadata line belongs to the narration.
+    """
     matches = list(SHOT_HEADING.finditer(copy))
     shots: list[tuple[int, str]] = []
     for position, match in enumerate(matches):
         end = matches[position + 1].start() if position + 1 < len(matches) else len(copy)
+        paragraph: list[str] = []
         for line in copy[match.end():end].splitlines():
             value = line.strip()
             if (
                 not value
-                or value.startswith(("证据：", "文章依据：", "文章证据：", "数据表", "---"))
-                or value.startswith(("- ", "**", "##", "#"))
-                or value.startswith(("字幕分段：", "字幕分段"))
+                or value.startswith(NARRATION_METADATA_PREFIXES)
+                or value.startswith(NARRATION_MARKUP_PREFIXES)
             ):
+                if paragraph:
+                    break
                 continue
-            value = re.sub(r"^口播[：:]\s*", "", value)
-            if value:
-                shots.append((int(match.group(1)), value))
-                break
+            if not paragraph:
+                value = re.sub(r"^口播[：:]\s*", "", value)
+                if not value:
+                    continue
+            paragraph.append(value)
+        if paragraph:
+            shots.append((int(match.group(1)), _join_narration_lines(paragraph)))
     if not shots:
         raise ValueError("copy-for-approval.md must contain headings such as '### 镜头1' followed by narration")
     return shots
@@ -147,7 +146,9 @@ def table_capacity_warning(article_text: str) -> str | None:
     for line in str(article_text or "").splitlines():
         if "|" not in line:
             continue
-        first_cell = line.split("|", 1)[0].strip().strip("*_ ")
+        if re.fullmatch(r"[\s|:\-]+", line):
+            continue  # a Markdown separator row such as |---|---|
+        first_cell = line.strip().strip("|").split("|", 1)[0].strip().strip("*_ ")
         if first_cell.casefold() in PARAMETER_TABLE_HEADERS:
             continue
         rows += 1
@@ -188,9 +189,16 @@ def overlong_clauses(shots: list[tuple[int, str]]) -> list[dict[str, Any]]:
 
 def _comparison_text(value: str) -> str:
     """Remove formatting and generic glue words before comparing shot copy."""
-    value = re.sub(r"[\s，,、；;：:。！？!?（）()「」『』“”\"'、·]", "", value)
-    value = re.sub(r"(?:PC|PP|PE|HDPE|LDPE|LLDPE|PVC|ABS|POM|PET|PA66?)\w*", "", value, flags=re.IGNORECASE)
-    return value
+    # Drop only the grade token itself (prefix plus its ASCII code). `\w` would
+    # also swallow the Chinese clause after it, so "这款PP Z30S耐热" and
+    # "这款PP Z30S刚性好" both collapsed to "这款" and were deleted as duplicates.
+    value = re.sub(
+        r"(?<![A-Za-z])(?:HDPE|LDPE|LLDPE|PC|PP|PE|PVC|ABS|POM|PET|PA66?)(?:\s*[-/]?\s*[A-Za-z0-9][A-Za-z0-9-]*)?",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"[\s，,、；;：:。！？!?（）()「」『』“”\"'、·]", "", value)
 
 
 def _char_ngrams(value: str, size: int = 3) -> set[str]:
@@ -266,7 +274,9 @@ def remove_duplicate_shot_blocks(copy: str) -> tuple[str, list[tuple[int, str]],
             removed.append(shot[0])
             continue
         kept.append((next_index, shot[1]))
-        chunks.append(re.sub(r"^(###\s*镜头\s*)\d+(\s*)$", rf"\g<1>{next_index}\g<2>", block.splitlines()[0], count=1, flags=re.MULTILINE) + "\n" + "\n".join(block.splitlines()[1:]))
+        # Renumber only the heading digits and keep the block's own text and
+        # line breaks, so the next heading still starts on its own line.
+        chunks.append(re.sub(r"^(#{2,3}\s*镜头\s*)\d+", rf"\g<1>{next_index}", block, count=1))
         next_index += 1
     if not kept:
         raise ValueError("自动去重后没有剩余有效镜头文案")
@@ -370,7 +380,9 @@ def main() -> int:
         parser.error("article.json root must be an object")
     original_copy = copy_path.read_text(encoding="utf-8")
     adjusted_copy, shots, removed_shots = remove_duplicate_shot_blocks(original_copy)
+    job_path = output_dir / "video-job.json"
     if removed_shots:
+        require_unapproved_copy(job_path, removed_shots)
         atomic_write(copy_path, adjusted_copy)
     validate_generation_subtitles(shots)
     validate_shot_distinctness(shots)
@@ -381,9 +393,6 @@ def main() -> int:
     atomic_write(destination, content)
     docx_destination = output_dir / "subtitle-for-approval.docx"
     render_subtitles_docx(docx_destination, str(article.get("title") or "").strip(), args.product_grade.strip(), shots)
-    job_path = output_dir / "video-job.json"
-    if removed_shots and job_path.is_file():
-        refresh_approved_snapshot(job_path, copy_path, destination, removed_shots)
     print(json.dumps({
         "output": str(destination),
         "docx_output": str(docx_destination),

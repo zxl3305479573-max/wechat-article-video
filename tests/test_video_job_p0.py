@@ -47,7 +47,7 @@ def approved_job(job_dir: Path, shot_count: int = 5) -> Path:
     (job_dir / "audio").mkdir(parents=True)
     (job_dir / "copy-for-approval.md").write_text("已审批文案", encoding="utf-8")
     (job_dir / "article.json").write_text(
-        json.dumps({"body_text": f"原文：{PRODUCT_GRADE}"}, ensure_ascii=False),
+        json.dumps({"body_text": f"原文：{PRODUCT_GRADE}\n\n密度0.900 g/cm³"}, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -74,7 +74,7 @@ def approved_job(job_dir: Path, shot_count: int = 5) -> Path:
                 "table": {
                     "title": "参数",
                     "columns": ["项目", "数值"],
-                    "rows": [["牌号", PRODUCT_GRADE]],
+                    "rows": [["密度", "0.900 g/cm³"]],
                 },
             }
         )
@@ -451,3 +451,100 @@ class ActualDurationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImagePromptCompletionTests(unittest.TestCase):
+    PEOPLE = "14:10 horizontal composition, Chinese workers only checking boxes, no foreign, Western, mixed-ethnicity, or ambiguous faces"
+
+    def test_people_prompt_that_prohibits_foreign_faces_is_accepted(self):
+        # The validator used to reject exactly the prohibition SKILL.md requires.
+        from validate_video_job import validate_ai_image_prompt
+
+        validate_ai_image_prompt("shot 1", self.PEOPLE)
+        with self.assertRaisesRegex(ValueError, '"western"'):
+            validate_ai_image_prompt("shot 1", "14:10 horizontal composition, Chinese workers only, no foreign faces")
+
+    def test_completion_adds_every_mandatory_clause_once(self):
+        from validate_video_job import complete_ai_image_prompt, validate_ai_image_prompt
+
+        prompt = "workers pouring pellets on an injection molding factory line"
+        completed = complete_ai_image_prompt(prompt)
+        validate_ai_image_prompt("shot 1", completed)
+        self.assertTrue(completed.startswith("14:10 horizontal composition, workers pouring pellets"))
+        self.assertEqual(complete_ai_image_prompt(completed), completed)
+        self.assertEqual(complete_ai_image_prompt(self.PEOPLE), self.PEOPLE)
+
+    def test_validation_lists_every_bad_prompt_and_complete_prompts_fixes_them(self):
+        from validate_video_job import complete_job_prompts
+
+        with tempfile.TemporaryDirectory() as temporary:
+            job_path = approved_job(Path(temporary))
+            job = read_json(job_path)
+            job["closing_visuals"][0]["image_prompt"] = "14:10 horizontal composition, white pellets in a warehouse"
+            job["closing_visuals"][1]["image_prompt"] = "delivery workers at a factory gate"
+            untouched = job["closing_visuals"][0]["image_path"]
+            write_json(job_path, job)
+            with self.assertRaises(ValueError) as raised:
+                validate(job_path)
+            message = str(raised.exception)
+            self.assertIn("closing_visual 1", message)
+            self.assertIn("closing_visual 2", message)
+            self.assertIn("--complete-prompts", message)
+
+            result = complete_job_prompts(job_path)
+            self.assertEqual(result["status"], "valid")
+            self.assertEqual(result["completed_prompts"], ["closing_visual 1", "closing_visual 2"])
+            saved = read_json(job_path)
+            self.assertIn("white semi-transparent plastic pellets", saved["closing_visuals"][0]["image_prompt"])
+            self.assertEqual(saved["closing_visuals"][0]["image_path"], untouched)
+            # Prompts are outside the sealed approval, so a rerun stays valid
+            # and leaves the now-compliant prompts byte-identical.
+            self.assertEqual(complete_job_prompts(job_path)["completed_prompts"], [])
+
+
+class TableSourceTests(unittest.TestCase):
+    def test_table_value_missing_from_the_article_is_rejected_with_every_cell_listed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            job_path = approved_job(Path(temporary), shot_count=2)
+            job = read_json(job_path)
+            job["shots"][0]["table"]["rows"] = [["密度", "0.905 g/cm³"]]
+            job["shots"][1]["table"]["rows"] = [["熔指", "20 g/10min"]]
+            write_json(job_path, job)
+            with self.assertRaises(ValueError) as raised:
+                validate(job_path)
+            self.assertIn('shot 1 table.rows[1][2] "0.905 g/cm³"', str(raised.exception))
+            self.assertIn('shot 2 table.rows[1][2] "20 g/10min"', str(raised.exception))
+
+    def test_spacing_and_full_width_forms_still_match_the_article(self):
+        from validate_video_job import require_table_values_in_article
+
+        shot = {"index": 1, "visual_type": "data_table", "table": {"rows": [["密度", "0.900g/cm³"], ["温度", "１８０-２３０ ℃"]]}}
+        require_table_values_in_article([shot], "密度 0.900 g/cm³，加工温度180-230℃")
+
+    def test_rendered_table_comes_from_the_validated_plan_not_a_stale_file(self):
+        import prepare_local_assets
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "tables").mkdir()
+            (root / "tables" / "001.json").write_text(
+                json.dumps({"title": "旧表", "columns": ["项目", "数值"], "rows": [["密度", "9.999"]]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            shot = {
+                "index": 1,
+                "visual_type": "data_table",
+                "image_path": "images/001.png",
+                "table": {"title": "物性", "columns": ["项目", "数值"], "rows": [["密度", "0.900 g/cm³"]]},
+            }
+            logo = root / "logo.png"
+            Image.new("RGBA", (40, 20), (0, 0, 0, 255)).save(logo)
+            _index, status, result = prepare_local_assets.local_asset_task(root, shot, logo)
+            self.assertEqual(status, "completed")
+            record = json.loads((root / "tables" / "001.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["rows"], [["密度", "0.900 g/cm³"]])
+            with Image.open(root / "images" / "001.png") as image:
+                # Same pixels as the AI images, so the Logo is the same size.
+                self.assertEqual(image.size, (1680, 1200))
+            self.assertTrue((root / result["logo_image_path"]).is_file())

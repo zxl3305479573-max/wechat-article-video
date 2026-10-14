@@ -9,11 +9,14 @@ import re
 from pathlib import Path
 from typing import Any
 
+from job_store import save_plan_job
 from subtitle_timing import split_timeline_segments
 
 
 MATERIAL_GRADE_PATTERN = re.compile(
-    r"(?<![A-Za-z0-9])(?:HDPE|LDPE|LLDPE|PP|PVC|ABS|PS|HIPS|GPPS|EVA|POE|PC|POM|PET|PBT|PA(?:6|66)?|TPU|TPE|SBS|SEBS|ASA|PMMA)\s*[-/]?\s*([A-Za-z]*\d[A-Za-z0-9-]*)",
+    # The trailing lookahead keeps a decimal measurement such as "PP 0.9 g/cm³"
+    # from being read as a grade code ("PP 零.9").
+    r"(?<![A-Za-z0-9])(?:HDPE|LDPE|LLDPE|PP|PVC|ABS|PS|HIPS|GPPS|EVA|POE|PC|POM|PET|PBT|PA(?:6|66)?|TPU|TPE|SBS|SEBS|ASA|PMMA)\s*[-/]?\s*([A-Za-z]*\d[A-Za-z0-9-]*)(?![.\d])",
     re.IGNORECASE,
 )
 LABELLED_GRADE_PATTERN = re.compile(
@@ -42,6 +45,7 @@ STANDALONE_GRADE_PATTERN = re.compile(
 
 
 CHINESE_DIGITS = str.maketrans("0123456789", "零一二三四五六七八九")
+COMPARISON_SIGNS = str.maketrans({"≥": "大于等于", "≤": "小于等于", "⩾": "大于等于", "⩽": "小于等于"})
 
 
 def spoken_number(value: str) -> str:
@@ -120,6 +124,9 @@ def prepare_text(text: str, product_grade: str) -> str:
     """Prepare TTS text while preserving visible measurements in subtitles."""
     if not product_grade.strip():
         raise ValueError("product_grade is required")
+    # Comparison signs are read aloud explicitly instead of being left to the
+    # TTS engine, which may skip them: "≥600%" -> "大于等于百分之600".
+    text = text.translate(COMPARISON_SIGNS)
     # MiniMax can omit the percent unit. Put it before the value so it is
     # spoken unambiguously, then apply the long-number pronunciation rule.
     text = re.sub(r"(\d+(?:\.\d+)?)\s*[%％]", r"百分之\1", text)
@@ -138,11 +145,8 @@ def prepare_text(text: str, product_grade: str) -> str:
 
 
 def save_job(job_path: Path, job: dict[str, Any]) -> None:
-    temporary_path = job_path.with_suffix(".json.tmp")
-    temporary_path.write_text(
-        json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    temporary_path.replace(job_path)
+    """Plan-side write; keeps fields the image stage wrote meanwhile."""
+    save_plan_job(job_path, job)
 
 
 def prepare_job(job_path: Path) -> dict[str, int]:

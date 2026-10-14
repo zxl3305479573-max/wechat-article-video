@@ -1,4 +1,5 @@
 import os
+from array import array
 import json
 import hashlib
 import sys
@@ -207,12 +208,12 @@ class ClosingVisualTests(unittest.TestCase):
 
 
 class AsrBoundaryTests(unittest.TestCase):
-    def run_sync(self, segments, duration=None):
+    def run_sync(self, segments, duration=None, shot=None):
         fake_audio_manager = type("AudioManager", (), {"extract_audio_text": lambda self, path: segments})
         with tempfile.TemporaryDirectory() as temporary:
             audio = Path(temporary) / "shot.mp3"
             audio.write_bytes(b"mp3")
-            shot = {"subtitle": "第一句，第二句", "subtitle_segments": ["第一句", "第二句"]}
+            shot = shot or {"subtitle": "第一句，第二句", "subtitle_segments": ["第一句", "第二句"]}
             with patch.object(generate_job_audio, "AudioManager", fake_audio_manager), patch.object(generate_job_audio, "measured_audio_duration_ms", return_value=duration):
                 generate_job_audio.sync_subtitles(shot, audio)
             return shot
@@ -260,6 +261,137 @@ class AsrBoundaryTests(unittest.TestCase):
     def test_uncovered_audio_edges_fall_back(self):
         shot = self.run_sync([{"begin_ms": 300, "end_ms": 700}, {"begin_ms": 700, "end_ms": 900}], 1000)
         self.assertEqual(shot["subtitle_sync_status"], "fallback")
+
+    def test_word_timestamps_put_the_boundary_on_the_real_pause(self):
+        # One ASR sentence, but the second clause only starts after a long
+        # pause. Character interpolation would cut at 1500 ms; words say 2000.
+        words = [
+            {"text": "第一", "begin_ms": 0, "end_ms": 600},
+            {"text": "句", "begin_ms": 600, "end_ms": 900},
+            {"text": "第二", "begin_ms": 2000, "end_ms": 2600},
+            {"text": "句", "begin_ms": 2600, "end_ms": 3000},
+        ]
+        shot = self.run_sync(
+            [{"text": "第一句，第二句", "begin_ms": 0, "end_ms": 3000, "words": words}], 3000
+        )
+        self.assertEqual(shot["subtitle_sync_status"], "completed")
+        self.assertEqual(
+            shot["asr_subtitle_segments"],
+            [
+                {"text": "第一句", "start_ms": 0, "end_ms": 900},
+                {"text": "第二句", "start_ms": 2000, "end_ms": 3000},
+            ],
+        )
+
+    def test_word_timestamps_win_even_when_sentence_counts_match(self):
+        segments = [
+            {"text": "第一句，第二句", "begin_ms": 0, "end_ms": 3000, "words": [
+                {"text": "第一句", "begin_ms": 0, "end_ms": 900},
+                {"text": "第二句", "begin_ms": 2000, "end_ms": 3000},
+            ]},
+        ]
+        shot = self.run_sync(segments, 3000, shot={"subtitle": "第一句第二句", "subtitle_segments": ["第一句第二句"]})
+        self.assertEqual(shot["asr_subtitle_segments"], [{"text": "第一句第二句", "start_ms": 0, "end_ms": 3000}])
+
+    def test_tts_leading_and_trailing_silence_is_absorbed_not_rejected(self):
+        shot = self.run_sync(
+            [
+                {"text": "第一句", "begin_ms": 450, "end_ms": 1200},
+                {"text": "第二句", "begin_ms": 1300, "end_ms": 2100},
+            ],
+            2600,
+        )
+        self.assertEqual(shot["subtitle_sync_status"], "completed")
+        self.assertEqual(
+            shot["asr_subtitle_segments"],
+            [
+                {"text": "第一句", "start_ms": 0, "end_ms": 1200},
+                {"text": "第二句", "start_ms": 1300, "end_ms": 2600},
+            ],
+        )
+
+    def test_asr_that_lost_seconds_of_speech_still_falls_back(self):
+        shot = self.run_sync(
+            [
+                {"text": "第一句", "begin_ms": 2000, "end_ms": 2600},
+                {"text": "第二句", "begin_ms": 2700, "end_ms": 3200},
+            ],
+            3300,
+        )
+        self.assertEqual(shot["subtitle_sync_status"], "fallback")
+
+    def test_clause_asr_spelled_differently_takes_the_time_between_neighbours(self):
+        # "MFR" is heard as "熔体流动速率": no character of that clause matches,
+        # which used to discard the whole clip's ASR timing.
+        shot = {
+            "subtitle": "这款料韧性很好，MFR，适合做周转箱。",
+            "subtitle_segments": ["这款料韧性很好，", "MFR，", "适合做周转箱。"],
+        }
+        words = [
+            {"text": "这款料", "begin_ms": 0, "end_ms": 600},
+            {"text": "韧性很好", "begin_ms": 600, "end_ms": 1400},
+            {"text": "熔体流动速率", "begin_ms": 1700, "end_ms": 2800},
+            {"text": "适合做周转箱", "begin_ms": 3100, "end_ms": 5000},
+        ]
+        shot = self.run_sync(
+            [{"text": "这款料韧性很好熔体流动速率适合做周转箱", "begin_ms": 0, "end_ms": 5000, "words": words}],
+            5000,
+            shot=shot,
+        )
+        self.assertEqual(shot["subtitle_sync_status"], "completed")
+        self.assertEqual(
+            [(item["start_ms"], item["end_ms"]) for item in shot["asr_subtitle_segments"]],
+            [(0, 1400), (1400, 3100), (3100, 5000)],
+        )
+
+    def test_alignment_uses_the_spoken_tts_spelling_when_closer(self):
+        shot = {
+            "subtitle": "HDPE 8008，温度180-230℃。",
+            "tts_text": "HDPE 八零零八，温度一百八十到二百三十摄氏度。",
+            "subtitle_segments": ["HDPE 8008，", "温度180-230℃。"],
+        }
+        words = [
+            {"text": "HDPE", "begin_ms": 0, "end_ms": 500},
+            {"text": "八零零八", "begin_ms": 500, "end_ms": 1300},
+            {"text": "温度", "begin_ms": 1700, "end_ms": 2100},
+            {"text": "一百八十到二百三十摄氏度", "begin_ms": 2100, "end_ms": 4000},
+        ]
+        shot = self.run_sync(
+            [{"text": "HDPE八零零八温度一百八十到二百三十摄氏度", "begin_ms": 0, "end_ms": 4000, "words": words}],
+            4000,
+            shot=shot,
+        )
+        self.assertEqual(shot["subtitle_sync_status"], "completed")
+        self.assertEqual(
+            shot["asr_subtitle_segments"],
+            [
+                {"text": "HDPE 8008，", "start_ms": 0, "end_ms": 1300},
+                {"text": "温度180-230℃。", "start_ms": 1700, "end_ms": 4000},
+            ],
+        )
+
+    def test_waveform_fallback_ignores_a_single_quiet_frame_between_syllables(self):
+        import math
+        import wave
+
+        rate = 16000
+        samples = []
+        for position in range(2 * rate):
+            ms = position * 1000 // rate
+            # Speech everywhere except a 20 ms syllable dip at 1100 ms and the
+            # real 300 ms comma pause at 1300-1600 ms.
+            silent = 1100 <= ms < 1120 or 1300 <= ms < 1600
+            samples.append(0 if silent else int(8000 * math.sin(2 * math.pi * 220 * position / rate)))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "shot.wav"
+            with wave.open(str(path), "wb") as output:
+                output.setnchannels(1)
+                output.setsampwidth(2)
+                output.setframerate(rate)
+                output.writeframes(array("h", samples).tobytes())
+            parts = jianying_local_draft.waveform_pause_timing("第一句话，第二句", 2_000_000, path)
+        self.assertEqual([text for text, _ in parts], ["第一句话，", "第二句"])
+        self.assertAlmostEqual(parts[0][1], 1_450_000, delta=40_000)
 
     def test_single_asr_segment_splits_contiguously_inside_asr_window(self):
         shot = {
@@ -666,3 +798,70 @@ class ReapprovalAndImageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RobustnessTests(unittest.TestCase):
+    def png_bytes(self):
+        import io
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (140, 100)).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def test_image_request_retries_once_after_a_dropped_connection(self):
+        import requests
+
+        backend = generate_job_images.ImageBackend("wan", "model", "key")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "a.png"
+            with patch.object(generate_job_images, "request_image", side_effect=[requests.ConnectionError("reset"), self.png_bytes()]) as request:
+                generate_job_images.generate_one("prompt", output, backend)
+            self.assertEqual(request.call_count, 2)
+            self.assertTrue(output.is_file())
+
+    def test_image_request_does_not_retry_a_rejected_prompt(self):
+        import requests
+
+        rejected = requests.HTTPError("400", response=types.SimpleNamespace(status_code=400))
+        backend = generate_job_images.ImageBackend("wan", "model", "key")
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(generate_job_images, "request_image", side_effect=[rejected]) as request:
+                with self.assertRaises(requests.HTTPError):
+                    generate_job_images.generate_one("prompt", Path(temporary) / "a.png", backend)
+            self.assertEqual(request.call_count, 1)
+
+    def test_detects_a_running_jianying_editor(self):
+        running = types.SimpleNamespace(stdout='"explorer.exe","1"\r\n"JianyingPro.exe","4242"\r\n')
+        idle = types.SimpleNamespace(stdout='"explorer.exe","1"\r\n')
+        with patch.object(jianying_local_draft.sys, "platform", "win32"):
+            with patch.object(jianying_local_draft.subprocess, "run", return_value=running):
+                self.assertTrue(jianying_local_draft.jianying_is_running())
+            with patch.object(jianying_local_draft.subprocess, "run", return_value=idle):
+                self.assertFalse(jianying_local_draft.jianying_is_running())
+
+
+class ProviderRetryAndSpeechTests(unittest.TestCase):
+    def png_bytes(self):
+        import io
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (140, 100)).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def test_gemini_or_openai_5xx_is_retried_but_4xx_is_not(self):
+        backend = generate_job_images.ImageBackend("doubao", "model", "key")
+        busy = generate_job_images.ImageAPIError("busy", 503)
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(generate_job_images, "request_image", side_effect=[busy, self.png_bytes()]) as request:
+                generate_job_images.generate_one("prompt", Path(temporary) / "a.png", backend)
+            self.assertEqual(request.call_count, 2)
+            bad = generate_job_images.ImageAPIError("bad prompt", 400)
+            with patch.object(generate_job_images, "request_image", side_effect=[bad]) as request:
+                with self.assertRaises(generate_job_images.ImageAPIError):
+                    generate_job_images.generate_one("prompt", Path(temporary) / "b.png", backend)
+            self.assertEqual(request.call_count, 1)
+
+    def test_comparison_signs_are_spoken(self):
+        self.assertEqual(prepare_text("断裂伸长率≥600%，灰分≤0.05%", "PP Z30S"), "断裂伸长率大于等于百分之600，灰分小于等于百分之0.05")

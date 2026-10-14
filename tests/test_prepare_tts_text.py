@@ -42,8 +42,14 @@ class PrepareTtsTextTest(unittest.TestCase):
         text = "与7260参数接近，55物性相似，7260可替代，80这款料常见；温度180-230℃，灰分0.05%，转速140 rpm。"
         self.assertEqual(
             prepare_text(text, "HDPE 8008"),
-            "与七二六零参数接近，五五物性相似，七二六零可替代，八零这款料常见；温度180-230℃，灰分百分之0.05，转速140 rpm。",
+            # Measurements keep normal number reading; only the range dash is
+            # spoken as "到" (read_ranges_and_units), never digit by digit.
+            "与七二六零参数接近，五五物性相似，七二六零可替代，八零这款料常见；温度180到230℃，灰分百分之0.05，转速140 rpm。",
         )
+
+    def test_measurement_after_a_material_prefix_is_not_read_as_a_grade(self) -> None:
+        self.assertEqual(prepare_text("PP 0.9 g/cm³的密度", "PP Z30S"), "PP 0.9 g/cm³的密度")
+        self.assertEqual(prepare_text("PP 7260 和 PP Z30S", "PP Z30S"), "PP 七二六零 和 PP Z三零S")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,14 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageFont
 
 
-CANVAS_SIZE = (1400, 1000)
+# Same pixels as every AI image (1680x1200), so the Logo and the Jianying
+# layout look identical on table and photo shots. The layout below was
+# designed on a 1400-wide canvas and is scaled by px().
+CANVAS_SIZE = (1680, 1200)
+LAYOUT_SCALE = CANVAS_SIZE[0] / 1400
+# Part of the table render hash: bump when the drawing changes so cached
+# table PNGs are re-rendered.
+TABLE_RENDER_VERSION = b"table-1680x1200-v2"
 BACKGROUND = (255, 255, 255)
 INK = (25, 25, 25)
 HEADER = (37, 70, 184)
@@ -20,6 +27,10 @@ ROW_B = (248, 249, 252)
 GRID = (187, 190, 198)
 FONT_DIR = Path(__file__).resolve().parents[1] / "assets" / "fonts"
 SOURCE_HAN_REGULAR = FONT_DIR / "SourceHanSansSC-Regular.otf"
+
+
+def px(value: float) -> int:
+    return round(value * LAYOUT_SCALE)
 
 
 def load_font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -70,7 +81,12 @@ def draw_centered_lines(
 
 
 def read_table(path: Path) -> tuple[str, list[str], list[list[str]]]:
-    data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8-sig"))
+    return parse_table(json.loads(path.read_text(encoding="utf-8-sig")))
+
+
+def parse_table(data: dict[str, Any]) -> tuple[str, list[str], list[list[str]]]:
+    if not isinstance(data, dict):
+        raise ValueError("table must be an object with title, columns and rows")
     title = str(data.get("title") or "Technical Parameters").strip()
     columns = [str(cell).strip() for cell in data.get("columns", [])]
     rows = [[str(cell).strip() for cell in row] for row in data.get("rows", [])]
@@ -84,33 +100,33 @@ def read_table(path: Path) -> tuple[str, list[str], list[list[str]]]:
 def render(title: str, columns: list[str], rows: list[list[str]], output: Path) -> None:
     image = Image.new("RGB", CANVAS_SIZE, BACKGROUND)
     draw = ImageDraw.Draw(image)
-    title_font = load_font(49, bold=True)
-    while title_font.size > 24 and text_width(draw, title, title_font) > 1200:
+    title_font = load_font(px(49), bold=True)
+    while title_font.size > px(24) and text_width(draw, title, title_font) > px(1200):
         title_font = load_font(title_font.size - 2, bold=True)
-    title_y = 110
+    title_y = px(110)
     draw.text((centered_x(draw, title, title_font, CANVAS_SIZE[0] // 2), title_y), title, fill=INK, font=title_font)
 
-    left, right, top, bottom = 165, 1235, 250, 885
+    left, right, top, bottom = px(165), px(1235), px(250), px(885)
     table_width = right - left
     column_widths = [table_width // len(columns)] * len(columns)
     column_widths[-1] += table_width - sum(column_widths)
     row_height = (bottom - top) // (len(rows) + 1)
-    cell_font = load_font(30)
-    while cell_font.size >= 16:
-        header_font = load_font(min(31, cell_font.size + 2), bold=True)
+    cell_font = load_font(px(30))
+    while cell_font.size >= px(16):
+        header_font = load_font(min(px(31), cell_font.size + 2), bold=True)
         header_lines = [
-            wrap_text(draw, label, header_font, column_widths[index] - 38)
+            wrap_text(draw, label, header_font, column_widths[index] - px(38))
             for index, label in enumerate(columns)
         ]
         cell_lines = [
-            [wrap_text(draw, cell, cell_font, column_widths[index] - 38) for index, cell in enumerate(row)]
+            [wrap_text(draw, cell, cell_font, column_widths[index] - px(38)) for index, cell in enumerate(row)]
             for row in rows
         ]
         cell_line_height = cell_font.getbbox("Hg")[3] - cell_font.getbbox("Hg")[1] + 5
         header_line_height = header_font.getbbox("Hg")[3] - header_font.getbbox("Hg")[1] + 5
         if (
-            max(len(lines) for lines in header_lines) * header_line_height <= row_height - 12
-            and all(max(len(lines) for lines in row) * cell_line_height <= row_height - 12 for row in cell_lines)
+            max(len(lines) for lines in header_lines) * header_line_height <= row_height - px(12)
+            and all(max(len(lines) for lines in row) * cell_line_height <= row_height - px(12) for row in cell_lines)
         ):
             break
         cell_font = load_font(cell_font.size - 2)

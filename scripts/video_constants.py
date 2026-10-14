@@ -13,6 +13,10 @@ FOOTER_CAPTIONS = (
     "兆企供应链拥有最终解释权",
 )
 
+# Part of every logo-marked image's cache hash. Both the local-asset stage
+# and the draft adapter must agree on it, so it is defined only here.
+LOGO_RENDER_VERSION = b"direct-source-logo-v7"
+
 
 def shot_image_paths(shot: dict[str, Any]) -> list[str]:
     """Return a shot's image paths, accepting the current and legacy schema.

@@ -4,7 +4,7 @@
 
 ## Configuration
 
-Set credentials in the WorkMate `.env` file:
+Set credentials in this skill's own `.env` file (existing process environment variables take precedence):
 
 ```text
 WECHAT_MP_APP_ID=<official-account-app-id>
@@ -24,7 +24,7 @@ The default token cache is stored below the current user's local application-dat
 For a known public article URL, bypass the account API and its IP whitelist:
 
 ```powershell
-python scripts\wechat_mp_articles.py url "https://mp.weixin.qq.com/s?..." --output output\<job-id>\article.json
+uv run python scripts\wechat_mp_articles.py url "https://mp.weixin.qq.com/s?..." --output output\<job-id>\article.json
 ```
 
 This mode accepts only HTTPS URLs hosted by `mp.weixin.qq.com`. If WeChat serves a verification page instead of article HTML, open the URL in the Agent browser and use the visible article text or export it as DOCX.

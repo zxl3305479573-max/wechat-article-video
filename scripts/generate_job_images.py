@@ -19,6 +19,8 @@ import requests
 from dotenv import load_dotenv
 from PIL import Image
 
+from job_store import save_visual_job
+
 
 DEFAULT_WAN_API_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
 DEFAULT_GEMINI_API_BASE = "https://generativelanguage.googleapis.com"
@@ -98,6 +100,14 @@ class ImageBackend:
     model_source: str = "env"
     endpoint: str = ""
     size: str = ""
+
+
+class ImageAPIError(ValueError):
+    """A provider answered with an HTTP error; `status_code` decides retrying."""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def save_json(path: Path, value: dict[str, Any]) -> None:
@@ -463,8 +473,9 @@ def request_gemini_image(prompt: str, backend: ImageBackend) -> bytes:
         generation_config.pop("imageConfig", None)
         response = requests.post(url, headers=headers, json=payload, timeout=180)
     if response.status_code >= 400:
-        raise ValueError(
-            f"Gemini API rejected the image request for {backend.model}: {api_error_message(response)}"
+        raise ImageAPIError(
+            f"Gemini API rejected the image request for {backend.model}: {api_error_message(response)}",
+            response.status_code,
         )
     return normalize_to_14_by_10(inline_image_bytes(response.json()))
 
@@ -529,8 +540,9 @@ def request_openai_image(prompt: str, backend: ImageBackend) -> bytes:
         timeout=180,
     )
     if response.status_code >= 400:
-        raise ValueError(
-            f"{backend.provider} image API rejected the request for {backend.model}: {api_error_message(response)}"
+        raise ImageAPIError(
+            f"{backend.provider} image API rejected the request for {backend.model}: {api_error_message(response)}",
+            response.status_code,
         )
     return openai_image_bytes(response.json())
 
@@ -554,8 +566,25 @@ def actual_pixels(path: Path) -> str:
         return "unreadable pixels"
 
 
+def is_transient_error(error: Exception) -> bool:
+    """A dropped connection, timeout, rate limit or 5xx is worth one more try."""
+    if isinstance(error, (requests.ConnectionError, requests.Timeout)):
+        return True
+    status = getattr(error, "status_code", None)
+    if status is None:
+        status = getattr(getattr(error, "response", None), "status_code", None)
+    return isinstance(status, int) and (status == 429 or status >= 500)
+
+
 def generate_one(prompt: str, output_path: Path, backend: ImageBackend) -> None:
-    image_bytes = request_image(prompt, backend)
+    try:
+        image_bytes = request_image(prompt, backend)
+    except (requests.RequestException, ImageAPIError) as error:
+        # Retry once here so a single network blip does not fail the stage and
+        # send the agent into a manual rerun; logic errors are not retried.
+        if not is_transient_error(error):
+            raise
+        image_bytes = request_image(prompt, backend)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
     temporary.write_bytes(image_bytes)
@@ -580,11 +609,13 @@ def generate(job_dir: Path, max_concurrency: int) -> dict[str, Any]:
     provider = backend.provider
     model = backend.model
     job_path = job_dir / "video-job.json"
-    from validate_video_job import require_verified_duration, validate
+    from validate_video_job import validate
 
+    # Images depend only on the sealed, validated plan, not on narration
+    # timing, so this stage runs in parallel with TTS/ASR. Its results are
+    # merged field by field (job_store), so neither stage overwrites the other.
     validate(job_path)
     job = load_job(job_path)
-    require_verified_duration(job)
     work: list[tuple[str, dict[str, Any], Path, str]] = []
     slots = visual_entries(job)
     owners: dict[str, str] = {}
@@ -697,7 +728,8 @@ def generate(job_dir: Path, max_concurrency: int) -> dict[str, Any]:
         )
         parent.pop("image_error", None)
     if changed or results:
-        save_json(job_path, job)
+        # Audio may be running in parallel; write only the image fields.
+        save_visual_job(job_path, job)
     return {"generated": completed, "failed": failed, "skipped": skipped, "provider": provider, "model": model, "model_source": backend.model_source, "ratio": RATIO}
 
 
@@ -707,7 +739,7 @@ def main() -> int:
     parser.add_argument("--max-concurrency", type=int, default=3)
     args = parser.parse_args()
     if not 1 <= args.max_concurrency <= 3:
-        raise ValueError("max concurrency must be between 1 and 3")
+        parser.error("--max-concurrency must be between 1 and 3")
     result = generate(args.job.resolve(), args.max_concurrency)
     print(json.dumps(result, ensure_ascii=False))
     return 1 if result["failed"] else 0

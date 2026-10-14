@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from audio_manager import AudioManager
+from job_store import save_plan_job
 from prepare_tts_text import prepare_job, prepare_text
 from subtitle_timing import split_timeline_segments
 from video_constants import FOOTER_CAPTIONS
@@ -26,7 +27,7 @@ DEFAULT_TTS_SPEED = 1.25
 STATE_DIRECTORY = "audio/.state"
 # Bump when the ASR-to-subtitle alignment changes so cached fallback states are
 # re-evaluated instead of being reused.
-SUBTITLE_SYNC_VERSION = "asr-character-alignment-v2"
+SUBTITLE_SYNC_VERSION = "asr-word-alignment-v3"
 
 
 def audio_state_path(job_dir: Path, name: str) -> Path:
@@ -57,11 +58,8 @@ def load_job(job_path: Path) -> dict[str, Any]:
 
 
 def save_job(job_path: Path, job: dict[str, Any]) -> None:
-    temporary_path = job_path.with_suffix(".json.tmp")
-    temporary_path.write_text(
-        json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    temporary_path.replace(job_path)
+    """Audio-stage write; keeps fields the image stage wrote meanwhile."""
+    save_plan_job(job_path, job)
 
 
 def audio_hash(text: str, voice_id: str, speed: float) -> str:
@@ -144,57 +142,146 @@ def use_estimated_subtitle_timing(shot: dict[str, Any], reason: str) -> None:
     shot["subtitle_sync_warning"] = reason
 
 
-def align_asr_sentence_boundaries(
-    visible_sentences: list[str], segments: list[dict[str, Any]]
-) -> list[tuple[int, int]] | None:
-    """Read authored sentence times from ASR when the sentence counts differ.
+ASR_TEXT_MATCH_RATIO = 0.72
+# Leading/trailing silence in a TTS clip is normal and is simply absorbed by
+# the first and last subtitle. Only a gap this large means ASR lost speech.
+ASR_EDGE_SILENCE_LIMIT_MS = 1500
 
-    ASR freely merges or splits sentences, so an exact count match rejects
-    usable timestamps. Match the authored characters against the recognized
-    ones and interpolate inside the ASR sentence that contains each match,
-    keeping the derived times anchored to measured speech boundaries.
-    """
-    authored_parts = [_normalize_asr_text(sentence) for sentence in visible_sentences]
-    authored = "".join(authored_parts)
+
+def segment_words(segment: dict[str, Any]) -> list[tuple[str, int, int]] | None:
+    """Return a sentence's word timestamps, or None when any word is unusable."""
+    words = segment.get("words")
+    if not isinstance(words, list) or not words:
+        return None
+    result: list[tuple[str, int, int]] = []
+    for word in words:
+        if not isinstance(word, dict):
+            return None
+        text = str(word.get("text") or "")
+        if not _normalize_asr_text(text):
+            continue
+        start = parse_timestamp(word.get("begin_ms", word.get("begin_time")))
+        end = parse_timestamp(word.get("end_ms", word.get("end_time")))
+        if start is None or end is None or start < 0 or end <= start:
+            return None
+        result.append((text, start, end))
+    return result or None
+
+
+def asr_character_timeline(segments: list[dict[str, Any]]) -> tuple[str, list[tuple[float, float]]]:
+    """Spread recognized characters over word times, or sentence times without words."""
     recognized = ""
     timeline: list[tuple[float, float]] = []
     for segment in segments:
-        text = _normalize_asr_text(segment.get("text"))
-        if not text:
+        units = segment_words(segment)
+        if units is None:
+            start = parse_timestamp(segment.get("begin_ms", segment.get("begin_time")))
+            end = parse_timestamp(segment.get("end_ms", segment.get("end_time")))
+            units = [(str(segment.get("text") or ""), start, end)]
+        for text, start, end in units:
+            text = _normalize_asr_text(text)
+            if not text:
+                continue
+            span = end - start
+            for offset in range(len(text)):
+                timeline.append(
+                    (start + span * offset / len(text), start + span * (offset + 1) / len(text))
+                )
+            recognized += text
+    return recognized, timeline
+
+
+def has_word_timestamps(segments: list[dict[str, Any]]) -> bool:
+    return any(segment_words(segment) for segment in segments)
+
+
+def closest_authored_sentences(candidates: list[list[str]], recognized: str) -> tuple[list[str], float]:
+    """Pick the authored spelling (visible or TTS) that ASR heard most closely."""
+    best: tuple[list[str], float] = (candidates[0], 0.0)
+    for sentences in candidates:
+        authored = _normalize_asr_text("".join(sentences))
+        if not authored or not recognized:
             continue
-        start = parse_timestamp(segment.get("begin_ms", segment.get("begin_time")))
-        end = parse_timestamp(segment.get("end_ms", segment.get("end_time")))
-        span = end - start
-        for offset in range(len(text)):
-            timeline.append(
-                (start + span * offset / len(text), start + span * (offset + 1) / len(text))
-            )
-        recognized += text
+        ratio = difflib.SequenceMatcher(None, authored, recognized, autojunk=False).ratio()
+        if ratio > best[1]:
+            best = (sentences, ratio)
+    return best
+
+
+def align_asr_sentence_boundaries(
+    visible_sentences: list[str],
+    segments: list[dict[str, Any]],
+    audio_duration_ms: int | None = None,
+) -> list[tuple[int, int]] | None:
+    """Read authored sentence times from the ASR characters they match.
+
+    ASR freely merges or splits sentences, so match the authored characters
+    against the recognized ones and take times from word timestamps when ASR
+    supplies them (otherwise interpolate inside the matching ASR sentence). A
+    clause ASR spelled differently, such as a spoken number, takes the time
+    between its matched neighbours instead of rejecting the whole clip.
+    """
+    authored_parts = [_normalize_asr_text(sentence) for sentence in visible_sentences]
+    authored = "".join(authored_parts)
+    recognized, timeline = asr_character_timeline(segments)
     if not authored or not recognized:
         return None
-    if difflib.SequenceMatcher(None, authored, recognized).ratio() < 0.72:
+    if difflib.SequenceMatcher(None, authored, recognized, autojunk=False).ratio() < ASR_TEXT_MATCH_RATIO:
         return None
     matched: list[int | None] = [None] * len(authored)
     matcher = difflib.SequenceMatcher(None, authored, recognized, autojunk=False)
     for block in matcher.get_matching_blocks():
         for offset in range(block.size):
             matched[block.a + offset] = block.b + offset
-    aligned: list[tuple[int, int]] = []
+    spans: list[tuple[float, float] | None] = []
     cursor = 0
-    previous_end = 0
+    previous_end = 0.0
     for part in authored_parts:
-        indexes = [
-            index for index in matched[cursor : cursor + len(part)] if index is not None
-        ]
+        window = matched[cursor : cursor + len(part)]
         cursor += len(part)
+        indexes = [index for index in window if index is not None]
         if not indexes:
-            return None
-        start = max(round(timeline[indexes[0]][0]), previous_end)
-        end = round(timeline[indexes[-1]][1])
+            spans.append(None)
+            continue
+        # Leading characters ASR spelled differently were spoken straight
+        # after the previous clause, so the clause starts where that one ended.
+        start = timeline[indexes[0]][0] if window[0] is not None else previous_end
+        start = max(start, previous_end)
+        end = timeline[indexes[-1]][1]
         if end <= start:
             return None
-        aligned.append((start, end))
+        spans.append((start, end))
         previous_end = end
+    if all(span is None for span in spans):
+        return None
+    final_end = float(audio_duration_ms) if audio_duration_ms else timeline[-1][1]
+    index = 0
+    while index < len(spans):
+        if spans[index] is not None:
+            index += 1
+            continue
+        run_end = index
+        while run_end < len(spans) and spans[run_end] is None:
+            run_end += 1
+        gap_start = spans[index - 1][1] if index > 0 else 0.0
+        gap_end = spans[run_end][0] if run_end < len(spans) else max(final_end, gap_start)
+        weights = [max(1, len(authored_parts[position])) for position in range(index, run_end)]
+        if gap_end - gap_start < 100 * len(weights):
+            return None
+        cursor_ms = gap_start
+        for offset, weight in enumerate(weights):
+            length = (gap_end - gap_start) * weight / sum(weights)
+            spans[index + offset] = (cursor_ms, cursor_ms + length)
+            cursor_ms += length
+        index = run_end
+    aligned: list[tuple[int, int]] = []
+    previous = 0
+    for start, end in spans:
+        start_ms, end_ms = max(round(start), previous), round(end)
+        if end_ms <= start_ms:
+            return None
+        aligned.append((start_ms, end_ms))
+        previous = end_ms
     return aligned
 
 
@@ -208,8 +295,6 @@ def sync_subtitles(shot: dict[str, Any], audio_path: Path) -> None:
     if not all(isinstance(item, dict) for item in segments):
         use_estimated_subtitle_timing(shot, "ASR returned a malformed sentence list")
         return
-    authored_text = _normalize_asr_text("".join(visible_sentences))
-    recognized_text = _normalize_asr_text("".join(str(item.get("text") or "") for item in segments if isinstance(item, dict)))
     boundaries = [parse_timestamp(segment.get("begin_ms", segment.get("begin_time"))) for segment in segments]
     ends = [parse_timestamp(segment.get("end_ms", segment.get("end_time"))) for segment in segments]
     if any(value is None for value in boundaries + ends):
@@ -225,40 +310,47 @@ def sync_subtitles(shot: dict[str, Any], audio_path: Path) -> None:
     if any(start < previous_end for previous_end, start in zip(ends, boundaries[1:])):
         use_estimated_subtitle_timing(shot, "ASR sentence timestamps overlap or are not monotonic")
         return
-    if len(segments) == len(visible_sentences):
-        if (
-            not authored_text
-            or difflib.SequenceMatcher(None, authored_text, recognized_text).ratio() < 0.72
-        ):
+    # The MP3 speaks tts_text (grade digits, "百分之", "到"), so match against
+    # whichever spelling ASR heard more closely; the output keeps visible text.
+    recognized_text, _timeline = asr_character_timeline(segments)
+    candidates = [visible_sentences]
+    spoken_sentences = split_timeline_segments(str(shot.get("tts_text") or ""))
+    if len(spoken_sentences) == len(visible_sentences):
+        candidates.append(spoken_sentences)
+    alignment_sentences, ratio = closest_authored_sentences(candidates, recognized_text)
+    audio_duration_ms = measured_audio_duration_ms(audio_path)
+    if len(segments) == len(visible_sentences) and not has_word_timestamps(segments):
+        if ratio < ASR_TEXT_MATCH_RATIO:
             use_estimated_subtitle_timing(
                 shot, "ASR text does not match authored subtitle order; waveform alignment required"
             )
             return
         aligned = list(zip(boundaries, ends))
     else:
-        aligned = align_asr_sentence_boundaries(visible_sentences, segments)
+        # Word timestamps place every clause on its measured speech, so they
+        # win even when the ASR sentence count happens to match.
+        aligned = align_asr_sentence_boundaries(alignment_sentences, segments, audio_duration_ms)
         if aligned is None:
             use_estimated_subtitle_timing(
                 shot,
                 "ASR sentences could not be aligned to the authored subtitle order",
             )
             return
-        boundaries = [start for start, _end in aligned]
-        ends = [end for _start, end in aligned]
-    audio_duration_ms = measured_audio_duration_ms(audio_path)
+    boundaries = [start for start, _end in aligned]
+    ends = [end for _start, end in aligned]
     if audio_duration_ms is not None:
-        tolerance_ms = 250
-        if boundaries[0] > tolerance_ms or ends[-1] < audio_duration_ms - tolerance_ms:
+        if (
+            boundaries[0] > ASR_EDGE_SILENCE_LIMIT_MS
+            or ends[-1] < audio_duration_ms - ASR_EDGE_SILENCE_LIMIT_MS
+        ):
             use_estimated_subtitle_timing(
                 shot, "ASR sentence timestamps do not cover the measured audio boundaries"
             )
             return
-        # Normalize small ASR edge offsets so the first/last captions cover
-        # the actual clip without a visible leading or trailing drift.
-        if boundaries[0] <= tolerance_ms:
-            boundaries[0] = 0
-        if audio_duration_ms - ends[-1] <= tolerance_ms:
-            ends[-1] = audio_duration_ms
+        # TTS clips carry leading and trailing silence; let the first and last
+        # captions cover it instead of discarding otherwise valid timestamps.
+        boundaries[0] = 0
+        ends[-1] = max(audio_duration_ms, boundaries[-1] + 1)
     # Preserve real ASR offsets. Draft-only display segments must never replace
     # this source timing, otherwise a later import silently falls back to an
     # estimated character-length timeline.

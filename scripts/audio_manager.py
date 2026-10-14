@@ -24,6 +24,9 @@ TTS_POLL_TIMEOUT = (HTTP_CONNECT_TIMEOUT, 60.0)
 TTS_DOWNLOAD_TIMEOUT = (HTTP_CONNECT_TIMEOUT, 180.0)
 ASR_TRANSCRIPT_TIMEOUT = (HTTP_CONNECT_TIMEOUT, 120.0)
 TTS_POLL_DEADLINE_SECONDS = 300.0
+# enable_itn writes spoken numbers back as digits ("百分之六百" -> "600%"), which
+# is how the visible subtitles spell them, so numeric clauses still align.
+ASR_WORD_TIMESTAMP_OPTIONS = {"enable_words": True, "enable_itn": True}
 
 
 class AudioManager:
@@ -113,7 +116,15 @@ class AudioManager:
             file_url = audio_path_or_url
         if not file_url:
             raise ValueError("DashScope ASR requires a local file or public URL")
-        task = QwenTranscription.async_call(model="qwen3-asr-flash-filetrans", file_url=file_url)
+        # Word timestamps let subtitle boundaries land on the real pauses inside
+        # an ASR sentence instead of being interpolated by character count. An
+        # account or model revision that rejects the options still gets
+        # sentence timestamps from a plain request.
+        task = QwenTranscription.async_call(
+            model="qwen3-asr-flash-filetrans", file_url=file_url, **ASR_WORD_TIMESTAMP_OPTIONS
+        )
+        if getattr(task, "status_code", None) != 200:
+            task = QwenTranscription.async_call(model="qwen3-asr-flash-filetrans", file_url=file_url)
         if getattr(task, "status_code", None) != 200:
             raise ValueError(f"DashScope ASR submission failed: {getattr(task, 'message', '')}")
         task_id = getattr(getattr(task, "output", None), "task_id", None)
@@ -132,6 +143,15 @@ class AudioManager:
         transcript.raise_for_status()
         sentences = transcript.json().get("transcripts", [{}])[0].get("sentences", [])
         return [
-            {"text": item.get("text", ""), "begin_ms": item.get("begin_time"), "end_ms": item.get("end_time")}
+            {
+                "text": item.get("text", ""),
+                "begin_ms": item.get("begin_time"),
+                "end_ms": item.get("end_time"),
+                "words": [
+                    {"text": word.get("text", ""), "begin_ms": word.get("begin_time"), "end_ms": word.get("end_time")}
+                    for word in item.get("words") or []
+                    if isinstance(word, dict)
+                ],
+            }
             for item in sentences
         ]

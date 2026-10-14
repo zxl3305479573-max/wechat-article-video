@@ -14,34 +14,23 @@ from typing import Any
 
 from PIL import Image
 from apply_logo import apply_logo
-from render_data_table import read_table, render
-from validate_video_job import require_verified_duration, validate
-from video_constants import shot_image_paths
+from job_store import save_visual_job
+from render_data_table import TABLE_RENDER_VERSION, parse_table, read_table, render
+from validate_video_job import validate
+from video_constants import LOGO_RENDER_VERSION, shot_image_paths
 
 
-LOGO_RENDER_VERSION = b"direct-source-logo-v7"
 WATCH_STATE_DIRECTORY = ".local-assets"
 PRECOMPUTE_STATE_FILE = "precompute.json"
 
 
 def save_job(path: Path, job: dict[str, Any]) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(job, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def load_verified_job(job_path: Path) -> dict[str, Any]:
-    """Block local image work until the current MP3 timeline is verified."""
-    validate(job_path)
-    job = json.loads(job_path.read_text(encoding="utf-8-sig"))
-    if not isinstance(job, dict):
-        raise ValueError("video-job.json root must be an object")
-    require_verified_duration(job)
-    return job
+    """Visual-stage write: only table/logo/image fields, never audio results."""
+    save_visual_job(path, job)
 
 
 def load_planned_job(job_path: Path) -> dict[str, Any]:
-    """Load an approved plan for work that does not depend on MP3 timing."""
+    """Load the approved plan. Tables and logos never depend on MP3 timing."""
     validate(job_path)
     job = json.loads(job_path.read_text(encoding="utf-8-sig"))
     if not isinstance(job, dict):
@@ -149,10 +138,20 @@ def local_asset_task(job_dir: Path, shot: dict[str, Any], logo_path: Path) -> tu
     visual_type = str(shot.get("visual_type") or "ai_image")
     result: dict[str, str] = {}
     if visual_type == "data_table":
+        # The validated `shot.table` is the only source of the rendered values.
+        # A hand-written tables/*.json could drift from what preflight checked
+        # against the article, so the file is written from the plan as a record.
         table_value = shot.get("table_path") or f"tables/{index:03d}.json"
         table_path = resolve_job_path(job_dir, str(table_value))
-        title, columns, rows = read_table(table_path)
-        render_hash = hashlib.sha256(table_path.read_bytes()).hexdigest()
+        if isinstance(shot.get("table"), dict):
+            title, columns, rows = parse_table(shot["table"])
+            record = json.dumps({"title": title, "columns": columns, "rows": rows}, ensure_ascii=False, indent=2) + "\n"
+            if not table_path.is_file() or table_path.read_text(encoding="utf-8-sig") != record:
+                table_path.parent.mkdir(parents=True, exist_ok=True)
+                table_path.write_text(record, encoding="utf-8")
+        else:
+            title, columns, rows = read_table(table_path)  # legacy job without shot.table
+        render_hash = hashlib.sha256(TABLE_RENDER_VERSION + table_path.read_bytes()).hexdigest()
         if not image_path.is_file() or shot.get("table_source_hash") != render_hash:
             render(title, columns, rows, image_path)
         result["table_source_hash"] = render_hash
@@ -292,7 +291,7 @@ def watch(job_dir: Path, job_path: Path, interval: float, timeout: float) -> int
     """Prepare tables and logo assets without writing the shared job JSON."""
     started = time.monotonic()
     while True:
-        job = load_verified_job(job_path)
+        job = load_planned_job(job_path)
         visual_work = [
             item
             for item in visual_entries(job)
@@ -351,7 +350,7 @@ def main() -> int:
         if args.watch:
             raise ValueError("--precompute and --watch cannot be used together")
         return precompute(job_dir, job_path)
-    job = load_verified_job(job_path)
+    job = load_planned_job(job_path)
     if args.watch:
         if args.watch_interval <= 0 or args.watch_timeout <= 0:
             raise ValueError("watch interval and timeout must be positive")
