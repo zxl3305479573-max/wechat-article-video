@@ -1,0 +1,15 @@
+[project]
+name = "wechat-article-video"
+version = "0.0.23"
+description = "Local article-to-Jianying video generation skill"
+requires-python = ">=3.10"
+dependencies = [
+    "Pillow",
+    "dashscope",
+    "imageio-ffmpeg",
+    "pymediainfo",
+    "python-docx",
+    "python-dotenv",
+    "requests",
+    "uiautomation",
+]

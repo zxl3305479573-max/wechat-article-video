@@ -1,0 +1,19 @@
+# Virtual environment and interpreter artifacts created by `uv run`
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Per-job output and runtime state (generated media, tables, audio, drafts)
+output/
+temp/
+
+# Local-only environment overrides: never commit credentials
+.env
+.env.local
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

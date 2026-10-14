@@ -1,0 +1,10 @@
+# Runtime dependencies for the bundled article-to-Jianying workflow.
+# `pyproject.toml` is the canonical dependency manifest used by `uv run`.
+Pillow
+imageio-ffmpeg
+pymediainfo
+uiautomation
+python-docx
+requests
+python-dotenv
+dashscope

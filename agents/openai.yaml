@@ -1,0 +1,4 @@
+interface:
+  display_name: "WeChat Article Video"
+  short_description: "Turn supplied article content into a Jianying draft"
+  default_prompt: "Use $wechat-article-video to turn the article content I provide into a narrated Jianying draft with matching shots, subtitles, audio, and images."
