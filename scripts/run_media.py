@@ -110,6 +110,8 @@ def summary(job_dir: Path, draft: dict[str, Any], audio: dict[str, Any], images:
 
 
 def run(job_dir: Path, max_concurrency: int = 3, overwrite: bool = False) -> dict[str, Any]:
+    # Canonical form: short (8.3) names and junctions must not break path checks.
+    job_dir = job_dir.resolve()
     job_path = job_dir / "video-job.json"
     run_stage("准备 TTS 文本", lambda: prepare_job(job_path))
     # Narration and images only share the validated plan; each writes its own

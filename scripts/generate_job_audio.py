@@ -436,6 +436,8 @@ def invalidate_draft(job: dict[str, Any]) -> None:
 
 
 def generate(job_dir: Path, sync: bool) -> dict[str, Any]:
+    # Canonical form: short (8.3) names and junctions must not break path checks.
+    job_dir = job_dir.resolve()
     job_path = job_dir / "video-job.json"
     prepare_job(job_path)
     if not sync:

@@ -10,9 +10,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      # Pinned releases that run on Node 24 (Node 20 actions are deprecated).
+      - uses: actions/checkout@v7.0.1
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: "3.12"
 

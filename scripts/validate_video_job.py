@@ -235,9 +235,10 @@ def complete_job_prompts(job_path: Path) -> dict[str, Any]:
 def inside_job(job_dir: Path, value: Any, label: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} is required")
-    path = (job_dir / value).resolve()
+    root = job_dir.resolve()
+    path = (root / value).resolve()
     try:
-        path.relative_to(job_dir)
+        path.relative_to(root)
     except ValueError as exc:
         raise ValueError(f"{label} must stay inside the job directory: {value}") from exc
 

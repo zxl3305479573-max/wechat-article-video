@@ -40,9 +40,10 @@ def load_planned_job(job_path: Path) -> dict[str, Any]:
 
 
 def resolve_job_path(job_dir: Path, value: str) -> Path:
-    path = (job_dir / value).resolve()
+    root = job_dir.resolve()
+    path = (root / value).resolve()
     try:
-        path.relative_to(job_dir)
+        path.relative_to(root)
     except ValueError as exc:
         raise ValueError(f"asset path must stay inside the job directory: {value}") from exc
     return path
@@ -133,6 +134,8 @@ def save_precompute_state(job_dir: Path, state: dict[str, Any]) -> None:
 
 
 def local_asset_task(job_dir: Path, shot: dict[str, Any], logo_path: Path) -> tuple[int, str, dict[str, str]]:
+    # Canonical form: short (8.3) names and junctions must not break path checks.
+    job_dir = job_dir.resolve()
     index = int(shot["index"])
     image_path = image_path_for_shot(job_dir, shot, index)
     logo_image_path = job_dir / "images" / "logo" / f"{index:03d}.png"
@@ -200,6 +203,8 @@ def prepare_once(
     *,
     write_job: bool,
 ) -> tuple[int, int, int]:
+    # Canonical form: short (8.3) names and junctions must not break path checks.
+    job_dir = job_dir.resolve()
     logo_path = load_brand().assets["logo"]
     shots = local_shots(job_dir, job)
     expected = [item for item in visual_entries(job) if str(item.get("visual_type") or "ai_image") in {"ai_image", "data_table"}]

@@ -92,3 +92,24 @@ class JobStoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EquivalentJobPathTests(unittest.TestCase):
+    """The same job directory written another way (8.3 short name, junction,
+    or `..`) must pass every containment check. CI's temp dir is RUNNER~1."""
+
+    def test_containment_checks_accept_an_unresolved_job_directory(self):
+        import generate_job_images
+        import prepare_local_assets
+        from validate_video_job import inside_job
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "sub").mkdir()
+            same_dir_other_spelling = root / "sub" / ".."
+            image = generate_job_images.resolve_inside(same_dir_other_spelling, "images/a.png", "shot 1")
+            self.assertEqual(image, root / "images" / "a.png")
+            self.assertEqual(prepare_local_assets.resolve_job_path(same_dir_other_spelling, "images/a.png"), image)
+            inside_job(same_dir_other_spelling, "audio/001.mp3", "shot 1 audio_path")
+            with self.assertRaises(ValueError):
+                generate_job_images.resolve_inside(same_dir_other_spelling, "../outside.png", "shot 1")

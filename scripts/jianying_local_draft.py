@@ -786,6 +786,8 @@ def measure_timeline(job_dir: Path, job: dict[str, Any]) -> dict[str, Any]:
 
 def verify_duration(job_dir: Path) -> dict[str, Any]:
     """Persist a real MP3-based timeline measurement before image generation."""
+    # Canonical form: short (8.3) names and junctions must not break path checks.
+    job_dir = job_dir.resolve()
     job_path, job = load_job(job_dir)
     timing = measure_timeline(job_dir, job)
     for shot in job["shots"]:
@@ -975,6 +977,8 @@ def snapshot_draft_folder(draft_path: Path, job_dir: Path) -> Path | None:
 
 
 def create_draft(job_dir: Path, overwrite: bool = False) -> dict[str, Any]:
+    # Canonical form: short (8.3) names and junctions must not break path checks.
+    job_dir = job_dir.resolve()
     timing = verify_duration(job_dir)
     job_path, job = load_job(job_dir)
     current_visual_hash = visual_asset_hash(job_dir, job)

@@ -92,7 +92,7 @@ def write_job_subtitles(job_dir: Path, srt_path: Path) -> None:
             raise ValueError(f"{label} audio_path is required")
         path = (job_dir / value).resolve()
         try:
-            path.relative_to(job_dir)
+            path.relative_to(job_dir.resolve())
         except ValueError as exc:
             raise ValueError(f"{label} audio_path must stay inside the job directory") from exc
         if not path.is_file() or path.stat().st_size == 0:

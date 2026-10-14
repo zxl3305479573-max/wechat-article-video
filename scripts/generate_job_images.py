@@ -138,9 +138,10 @@ def load_job(job_path: Path) -> dict[str, Any]:
 def resolve_inside(job_dir: Path, value: Any, label: str) -> Path:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} is required")
-    path = (job_dir / value).resolve()
+    root = job_dir.resolve()
+    path = (root / value).resolve()
     try:
-        path.relative_to(job_dir)
+        path.relative_to(root)
     except ValueError as error:
         raise ValueError(f"{label} must stay inside the job directory") from error
     return path
@@ -603,6 +604,8 @@ def generate_one(prompt: str, output_path: Path, backend: ImageBackend) -> None:
 
 
 def generate(job_dir: Path, max_concurrency: int) -> dict[str, Any]:
+    # Canonical form: short (8.3) names and junctions must not break path checks.
+    job_dir = job_dir.resolve()
     # Load only this skill's project configuration; never walk into parent workspaces.
     load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
     backend = resolve_backend()
