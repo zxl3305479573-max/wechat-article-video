@@ -14,6 +14,7 @@ from typing import Any
 
 from PIL import Image
 from apply_logo import apply_logo
+from brand import load_brand
 from job_store import save_visual_job
 from render_data_table import TABLE_RENDER_VERSION, parse_table, read_table, render
 from validate_video_job import validate
@@ -199,7 +200,7 @@ def prepare_once(
     *,
     write_job: bool,
 ) -> tuple[int, int, int]:
-    logo_path = Path(__file__).resolve().parents[1] / "assets" / "logo.png"
+    logo_path = load_brand().assets["logo"]
     shots = local_shots(job_dir, job)
     expected = [item for item in visual_entries(job) if str(item.get("visual_type") or "ai_image") in {"ai_image", "data_table"}]
     available = {int(item["index"]) for item in shots}
@@ -316,13 +317,11 @@ def watch(job_dir: Path, job_path: Path, interval: float, timeout: float) -> int
 def precompute(job_dir: Path, job_path: Path) -> int:
     """Render tables and stamp already available images before MP3 verification."""
     job = load_planned_job(job_path)
-    required_templates = ("header.jpg", "header1.jpg", "header2.png", "footer.mp4", "logo.png")
-    assets_dir = Path(__file__).resolve().parents[1] / "assets"
+    brand_assets = load_brand().assets
     template_hashes: dict[str, str] = {}
-    for name in required_templates:
-        path = assets_dir / name
+    for name, path in brand_assets.items():
         if not path.is_file() or path.stat().st_size == 0:
-            raise ValueError(f"required template asset is missing: {path}")
+            raise ValueError(f"required brand asset {name} is missing: {path}")
         template_hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     shots, completed, failed = prepare_once(job_dir, job_path, job, write_job=False)
     state = {

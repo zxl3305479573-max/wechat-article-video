@@ -8,20 +8,23 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from brand import load_brand
 
-TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "assets" / "header1.jpg"
-LANDSCAPE_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "assets" / "header2.png"
+
+BRAND = load_brand()
+TEMPLATE_PATH = BRAND.assets["cover_template"]
+LANDSCAPE_TEMPLATE_PATH = BRAND.assets["landscape_cover_template"]
 FONT_PATH = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "SourceHanSansSC-Regular.otf"
 
 # Coordinates are proportional to header1.jpg, preserving the supplied cover
 # template's layout even when it is rendered at a smaller delivery size.
-IMAGE_REGION = (0.068, 0.332, 0.932, 0.724)
-GRADE_REGION = (0.12, 0.754, 0.88, 0.862)
-LANDSCAPE_GRADE_REGION = (0.09, 0.520, 0.91, 0.660)
+IMAGE_REGION = BRAND.layout["cover_image_region"]
+GRADE_REGION = BRAND.layout["cover_grade_region"]
+LANDSCAPE_GRADE_REGION = BRAND.layout["landscape_grade_region"]
 LANDSCAPE_GRADE_FILL = (42, 42, 42)
 # The portrait cover grade is intentionally smaller than the supplied label
 # region so it has more breathing room beneath the main visual.
-COVER_GRADE_FONT_SCALE = 0.82
+COVER_GRADE_FONT_SCALE = BRAND.layout["cover_grade_font_scale"]
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont:

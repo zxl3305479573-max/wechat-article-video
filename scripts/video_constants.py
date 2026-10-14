@@ -2,16 +2,11 @@
 
 from typing import Any
 
-FOOTER_CAPTIONS = (
-    "买优质塑化原料",
-    "就找兆企供应链",
-    "兆企供应链管理有限公司深耕塑化行业",
-    "货源稳定 物流高效",
-    "找兆企采购{product_grade}",
-    "让生产更顺畅",
-    "本视频禁止用于ai模型训练",
-    "兆企供应链拥有最终解释权",
-)
+from brand import load_brand
+
+# The fixed closing captions come from brand.json; `{product_grade}` is
+# replaced with the current grade.
+FOOTER_CAPTIONS = load_brand().footer_captions
 
 # Part of every logo-marked image's cache hash. Both the local-asset stage
 # and the draft adapter must agree on it, so it is defined only here.

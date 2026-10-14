@@ -12,15 +12,18 @@ from pathlib import Path
 import imageio_ffmpeg
 from PIL import Image, ImageDraw, ImageFont
 from pymediainfo import MediaInfo
+from brand import load_brand
 from subtitle_timing import visible_subtitle_segments
 
 
+BRAND = load_brand()
 CANVAS_SIZE = (1080, 1920)
-VIDEO_WINDOW = (0, 488, 1080, 1485)
-CLEAR_VIDEO_FRAME = (0, 588, 1080, 1359)
-SUBTITLE_BASELINE_Y = 1415
-GRADE_REGION = (105, 1535, 975, 1755)
-DEFAULT_TEMPLATE = Path(__file__).resolve().parents[1] / "assets" / "header.jpg"
+# Template geometry lives in brand.json so a new template brings its own.
+VIDEO_WINDOW = BRAND.layout["video_window"]
+CLEAR_VIDEO_FRAME = BRAND.layout["image_frame"]
+SUBTITLE_BASELINE_Y = BRAND.layout["mp4_subtitle_baseline_y"]
+GRADE_REGION = BRAND.layout["grade_region"]
+DEFAULT_TEMPLATE = BRAND.assets["template_overlay"]
 SOURCE_HAN_REGULAR = Path(__file__).resolve().parents[1] / "assets" / "fonts" / "SourceHanSansSC-Regular.otf"
 
 

@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from article_paragraphs import PARAGRAPH_REFERENCE, paragraphs, resolve_evidence
+from brand import load_brand, opening_hook_example, opening_hook_pattern
 from job_store import save_plan_job
 from prepare_tts_text import prepare_text, spoken_product_grade
 from subtitle_timing import split_timeline_segments, visible_subtitle_segments
@@ -38,7 +40,7 @@ ALLOWED_STATUSES = {"planned", "pending", "generating", "completed", "failed", "
 DEFAULT_SHOT_BUDGET = {"max_total": 7, "max_data_tables": 3, "max_per_module": 2}
 ALLOWED_SHOT_MODULES = ("introduction", "characteristics", "applications")
 ESTIMATED_CLOSING_SECONDS = 17.0
-DEFAULT_TTS_SPEED = 1.25
+DEFAULT_TTS_SPEED = load_brand().speed
 APPROVAL_FILES = {
     "copy_path": "copy-for-approval.md",
     "subtitle_path": "subtitle-for-approval.md",
@@ -195,7 +197,7 @@ def require_ai_image_prompts(job: dict[str, Any]) -> None:
     if messages:
         raise ValueError(
             f"{len(messages)} image prompt problem(s):\n- " + "\n- ".join(messages)
-            + "\nRun `uv run python scripts\\validate_video_job.py output\\<job-id> --complete-prompts` "
+            + "\nRun `uv run --frozen python scripts\\validate_video_job.py output\\<job-id> --complete-prompts` "
             "to append the mandatory constraint clauses automatically, then revalidate."
         )
 
@@ -518,7 +520,8 @@ def require_article_order(article_text: str, shots: list[dict[str, Any]]) -> Non
         if position == 0 and shot.get("opening_hook_type") == "application_address":
             continue
         evidence = str(shot.get("article_evidence") or "").strip()
-        offset = article_text.find(evidence, cursor)
+        span = resolve_evidence(article_text, evidence, cursor)
+        offset = span[0] if span and span[0] >= cursor else -1
         if offset < 0:
             previous = f"shot {previous_index}" if previous_index is not None else "the preceding shot"
             raise ValueError(
@@ -611,7 +614,7 @@ def validate(job_path: Path) -> dict[str, Any]:
     audio = job.get("audio")
     if not isinstance(audio, dict):
         raise ValueError("audio configuration is required")
-    voice_id = audio.get("voice_id", "female-chengshu")
+    voice_id = audio.get("voice_id", load_brand().voice_id)
     if not isinstance(voice_id, str) or not voice_id.strip():
         raise ValueError("audio.voice_id must be a non-empty string")
     speed = audio.get("speed", DEFAULT_TTS_SPEED)
@@ -690,7 +693,12 @@ def validate(job_path: Path) -> dict[str, Any]:
         evidence = str(shot.get("article_evidence") or "").strip()
         if not evidence:
             raise ValueError(f"shot {index} article_evidence must be non-empty")
-        if evidence not in article_text:
+        if PARAGRAPH_REFERENCE.match(evidence) and resolve_evidence(article_text, evidence) is None:
+            raise ValueError(
+                f"shot {index} article_evidence {evidence} names a paragraph the article does not have "
+                f"(it has {len(paragraphs(article_text))}); see article-paragraphs.md"
+            )
+        if resolve_evidence(article_text, evidence) is None:
             hint = ""
             for length in range(min(len(evidence), 24), 3, -1):
                 position = article_text.find(evidence[:length])
@@ -707,6 +715,7 @@ def validate(job_path: Path) -> dict[str, Any]:
                     hint
                     or "; copy an exact run of characters from the article without added punctuation or reflowed text"
                 )
+                + ", or cite its paragraph number such as P3 (run scripts\\article_paragraphs.py to list them)"
             )
         if not str(shot.get("factual_message") or "").strip():
             raise ValueError(f"shot {index} factual_message must be non-empty")
@@ -721,7 +730,7 @@ def validate(job_path: Path) -> dict[str, Any]:
         if isinstance(tts_text, str) and not tts_text.strip():
             raise ValueError(
                 f"shot {index} tts_text is empty; leave the field out at plan time and let "
-                r"`uv run python scripts\prepare_tts_text.py --job <job-dir>` generate it, then revalidate"
+                r"`uv run --frozen python scripts\prepare_tts_text.py --job <job-dir>` generate it, then revalidate"
             )
         if tts_text is not None:
             expected_tts_text = prepare_text(str(shot["narration"]), product_grade)
@@ -823,14 +832,14 @@ def validate(job_path: Path) -> dict[str, Any]:
         ):
             raise ValueError("application_address opening requires 1-4 opening_applications")
         opening = str(first.get("narration") or "").strip()
-        if not re.match(r"^做.+的老板看过来[，,。！？!?]", opening):
+        if not opening_hook_pattern(load_brand()).match(opening):
             raise ValueError(
-                "application_address opening narration must begin with '做{文章应用场景}的老板看过来'"
+                f"application_address opening narration must begin with '{opening_hook_example(load_brand())}'"
             )
         subtitle_opening = str(first.get("subtitle") or "").strip()
-        if not re.match(r"^做.+的老板看过来[，,。！？!?]", subtitle_opening):
+        if not opening_hook_pattern(load_brand()).match(subtitle_opening):
             raise ValueError(
-                "application_address opening subtitle must begin with '做{文章应用场景}的老板看过来'"
+                f"application_address opening subtitle must begin with '{opening_hook_example(load_brand())}'"
             )
     for shot in job["shots"]:
         if int(shot["index"]) != int(first["index"]) and not str(shot.get("narration_transition") or "").strip():

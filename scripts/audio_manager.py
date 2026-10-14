@@ -29,6 +29,53 @@ TTS_POLL_DEADLINE_SECONDS = 300.0
 ASR_WORD_TIMESTAMP_OPTIONS = {"enable_words": True, "enable_itn": True}
 
 
+def _subtitle_entries(payload: Any) -> list[dict[str, Any]] | None:
+    """Find the sentence list in a MiniMax subtitle file, whatever wraps it."""
+    if isinstance(payload, list):
+        entries = [item for item in payload if isinstance(item, dict)]
+        return entries if entries and all("time_begin" in item for item in entries) else None
+    if isinstance(payload, dict):
+        if "time_begin" in payload:
+            return [payload]
+        for value in payload.values():
+            entries = _subtitle_entries(value)
+            if entries:
+                return entries
+    return None
+
+
+def parse_tts_subtitles(payload: Any) -> list[dict[str, Any]] | None:
+    """Convert MiniMax subtitles to the sentence/word shape the aligner reads.
+
+    Sentence entries carry `text`, `time_begin`, `time_end` and, with
+    `subtitle_type=word`, `timestamped_words` of `word`, `time_begin`,
+    `time_end` (milliseconds from the start of the audio).
+    """
+    entries = _subtitle_entries(payload)
+    if not entries:
+        return None
+    segments: list[dict[str, Any]] = []
+    for entry in entries:
+        words = entry.get("timestamped_words") if isinstance(entry.get("timestamped_words"), list) else []
+        segments.append(
+            {
+                "text": str(entry.get("text") or ""),
+                "begin_ms": entry.get("time_begin"),
+                "end_ms": entry.get("time_end"),
+                "words": [
+                    {
+                        "text": str(word.get("word", word.get("text", "")) or ""),
+                        "begin_ms": word.get("time_begin"),
+                        "end_ms": word.get("time_end"),
+                    }
+                    for word in words
+                    if isinstance(word, dict)
+                ],
+            }
+        )
+    return segments
+
+
 class AudioManager:
     def __init__(self) -> None:
         self.minimax_api_key = os.getenv("MINIMAX_API_KEY", "").strip()
@@ -36,8 +83,69 @@ class AudioManager:
         self.domain = os.getenv("MINIMAX_DOMAIN", "https://api.minimaxi.com").rstrip("/")
 
     def generate_audio(self, text: str, save_path: str, voice_id: str, speed: float) -> str:
+        """Write the MP3 and return its path (timestamps, if any, are discarded)."""
+        self.synthesize(text, save_path, voice_id, speed)
+        return str(Path(save_path))
+
+    def synthesize(
+        self, text: str, save_path: str, voice_id: str, speed: float
+    ) -> list[dict[str, Any]] | None:
+        """Write the MP3 and return MiniMax's word timestamps for it.
+
+        The synchronous endpoint returns the audio and a subtitle file with
+        per-word times for exactly the text it spoke, so subtitle timing needs
+        no separate speech recognition. Returns None when the provider sent no
+        usable timestamps (or MINIMAX_TTS_API=async); ASR then takes over.
+        """
         if not self.minimax_api_key:
             raise ValueError("MINIMAX_API_KEY is required")
+        if not 0.5 <= float(speed) <= 2.0:
+            raise ValueError("speed must be between 0.5 and 2.0")
+        if os.getenv("MINIMAX_TTS_API", "sync").strip().casefold() == "async":
+            self._generate_async(text, save_path, voice_id, speed)
+            return None
+        group_id = os.getenv("MINIMAX_GROUP_ID", "").strip()
+        response = requests.post(
+            f"{self.domain}/v1/t2a_v2",
+            headers={"Authorization": f"Bearer {self.minimax_api_key}", "Content-Type": "application/json"},
+            params={"GroupId": group_id} if group_id else None,
+            json={
+                "model": os.getenv("MINIMAX_TTS_MODEL", "speech-2.6-turbo"),
+                "text": text,
+                "stream": False,
+                "voice_setting": {"voice_id": voice_id, "speed": float(speed), "vol": 1, "pitch": 0},
+                "audio_setting": {"format": "mp3", "sample_rate": 32000},
+                "subtitle_enable": True,
+                "subtitle_type": "word",
+                "output_format": "hex",
+            },
+            timeout=TTS_CREATE_TIMEOUT,
+        )
+        response.raise_for_status()
+        result = response.json()
+        base = result.get("base_resp") if isinstance(result, dict) else None
+        if isinstance(base, dict) and base.get("status_code") not in (None, 0):
+            raise ValueError(f"MiniMax TTS failed: {base.get('status_code')} {base.get('status_msg') or ''}".strip())
+        data = result.get("data") if isinstance(result, dict) else None
+        audio_hex = data.get("audio") if isinstance(data, dict) else None
+        if not isinstance(audio_hex, str) or not audio_hex:
+            raise ValueError("MiniMax TTS returned no audio")
+        destination = Path(save_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(bytes.fromhex(audio_hex))
+        subtitle_url = data.get("subtitle_file")
+        if not isinstance(subtitle_url, str) or not subtitle_url.strip():
+            return None
+        try:
+            subtitles = requests.get(subtitle_url, timeout=TTS_POLL_TIMEOUT)
+            subtitles.raise_for_status()
+            return parse_tts_subtitles(subtitles.json())
+        except (requests.RequestException, ValueError):
+            # The MP3 is already paid for and saved; timing falls back to ASR.
+            return None
+
+    def _generate_async(self, text: str, save_path: str, voice_id: str, speed: float) -> str:
+        """The asynchronous endpoint: audio only, no timestamps."""
         if not 0.5 <= float(speed) <= 2.0:
             raise ValueError("speed must be between 0.5 and 2.0")
         headers = {"Authorization": f"Bearer {self.minimax_api_key}", "Content-Type": "application/json"}
@@ -97,7 +205,7 @@ class AudioManager:
             from dashscope import Files
             from dashscope.audio.qwen_asr import QwenTranscription
         except ImportError as error:
-            raise RuntimeError("dashscope is required for ASR; install requirements.txt") from error
+            raise RuntimeError("dashscope is required for ASR; run the scripts with `uv run --frozen`, which installs it") from error
 
         dashscope.api_key = self.dashscope_api_key
         source = Path(audio_path_or_url)

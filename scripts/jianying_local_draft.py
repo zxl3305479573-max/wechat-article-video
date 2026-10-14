@@ -19,6 +19,7 @@ from typing import Any
 from pymediainfo import MediaInfo
 import imageio_ffmpeg
 from apply_logo import apply_logo
+from brand import load_brand
 from job_store import save_plan_job, save_whole_job
 from subtitle_timing import (
     display_text,
@@ -31,38 +32,36 @@ from video_constants import FOOTER_CAPTIONS, LOGO_RENDER_VERSION, shot_image_pat
 
 
 JY_VENDOR_ROOT = Path(__file__).resolve().parent / "jianying_editor" / "scripts" / "vendor"
+BRAND = load_brand()
 # ClipSettings.transform_y is normalized, while Jianying's inspector displays
-# the equivalent offset in full-canvas pixels. Keep the inspector value at
-# exactly Y=-938 as requested by the template layout.
+# the equivalent offset in full-canvas pixels; brand.json holds the inspector
+# value (Y=-938 for the bundled template).
 TEMPLATE_SUBTITLE_TRANSFORM_X = 0.0
-TEMPLATE_SUBTITLE_TRANSFORM_Y = -938.0 / 1920.0
+TEMPLATE_SUBTITLE_TRANSFORM_Y = BRAND.layout["subtitle_y"] / 1920.0
 TEMPLATE_SUBTITLE_SIZE = 9.0
 TEMPLATE_SUBTITLE_BORDER_WIDTH = 55.0
 TEMPLATE_SUBTITLE_FILL = (0.949, 0.918, 0.855)  # #F2EADD
 TEMPLATE_SUBTITLE_OUTLINE = (0.294, 0.294, 0.271)  # #4B4B45
 # HeaderGrade is an independent template text layer. The draft library stores
 # Jianying inspector Y coordinates as a full-canvas pixel value divided by
-# 1920, so inspector Y=-1353 becomes -1353 / 1920.
+# 1920 (inspector Y=-1353 for the bundled template becomes -1353 / 1920).
 HEADER_GRADE_SIZE = 26.0
-HEADER_GRADE_TRANSFORM_Y = -1353.0 / 1920.0
+HEADER_GRADE_TRANSFORM_Y = BRAND.layout["header_grade_y"] / 1920.0
 TRACK_VISUAL_SCALE = 0.90
 
 if max(abs(TEMPLATE_SUBTITLE_TRANSFORM_X), abs(TEMPLATE_SUBTITLE_TRANSFORM_Y)) > 1.0:
     raise ValueError("subtitle transform must be normalized to the [-1, 1] canvas range")
 
 DRAFT_LAYOUT_VERSION = "template-overlay-v34-portable-draft-media"
-TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "assets" / "header.jpg"
-EXPORT_COVER_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "assets" / "header1.jpg"
-LANDSCAPE_COVER_TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "assets" / "header2.png"
-FOOTER_PATH = Path(__file__).resolve().parents[1] / "assets" / "footer.mp4"
+TEMPLATE_PATH = BRAND.assets["template_overlay"]
+EXPORT_COVER_TEMPLATE_PATH = BRAND.assets["cover_template"]
+LANDSCAPE_COVER_TEMPLATE_PATH = BRAND.assets["landscape_cover_template"]
+FOOTER_PATH = BRAND.assets["footer_video"]
 FOOTER_AUDIO_RELATIVE_PATH = "audio/footer.mp3"
-LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "logo.png"
-VIDEO_WINDOW = (0, 488, 1080, 1485)
-# Near-full-width 14:10 display frame, with roughly 100px above and a subtitle
-# band below inside the blurred fill area.
-CLEAR_VIDEO_FRAME = (0, 588, 1080, 1359)
-GRADE_REGION = (105, 1535, 975, 1755)
-SUBTITLE_Y = 1305
+LOGO_PATH = BRAND.assets["logo"]
+# Near-full-width 14:10 display frame inside the template, with a subtitle
+# band below it in the blurred fill area (brand.json `layout.image_frame`).
+CLEAR_VIDEO_FRAME = BRAND.layout["image_frame"]
 TRANSITION_SEQUENCE = ("叠化", "向上擦除", "向左擦除", "滑动", "闪白_II")
 # Kept as a name for existing callers; the captions live in video_constants.
 FOOTER_SUBTITLE_TEMPLATES = FOOTER_CAPTIONS
@@ -229,6 +228,9 @@ def split_subtitle_timing(
 
 
 MIN_PAUSE_FRAMES = 4  # 80 ms of low energy at 20 ms per frame
+# Subtitle segments timed from real speech: the TTS engine's own word
+# timestamps, or ASR on the MP3 for audio made before those existed.
+MEASURED_TIMING_SOURCES = ("tts_word_timestamps", "asr_sentence_timestamps")
 
 
 def waveform_pause_timing(
@@ -298,7 +300,7 @@ def waveform_pause_timing(
 def subtitle_parts_for_shot(shot: dict[str, Any], duration_us: int, audio_path: Path | None = None) -> list[tuple[str, int, int]]:
     """Return ASR timings when usable, otherwise local punctuation timings."""
     saved_segments = shot.get("asr_subtitle_segments")
-    if shot.get("subtitle_timing_source") == "asr_sentence_timestamps" and isinstance(
+    if shot.get("subtitle_timing_source") in MEASURED_TIMING_SOURCES and isinstance(
         saved_segments, list
     ):
         parts: list[tuple[str, int, int]] = []

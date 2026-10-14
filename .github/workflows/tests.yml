@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unittest:
+    # The skill targets Windows (Jianying Pro, uiautomation, MediaInfo DLL).
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Lockfile matches pyproject.toml
+        run: uv lock --check
+
+      - name: Unit and end-to-end tests
+        env:
+          PYTHONUTF8: "1"
+        run: uv run --frozen python -m unittest discover -s tests -v

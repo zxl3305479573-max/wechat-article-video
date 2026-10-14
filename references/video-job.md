@@ -1,6 +1,6 @@
 # video-job.json Schema
 
-One UTF-8 JSON file per video at `output/<job-id>/video-job.json`, written whole (never appended in fragments) after the copy is approved. Policy lives in `SKILL.md`; this file only describes the fields. The example below passes `validate_video_job.py` against a matching article.
+One UTF-8 JSON file per video at `output/<job-id>/video-job.json`. `build_video_job.py` generates it from the approved copy and `image-prompts.md`; do not write it by hand, and afterwards change only the specific field a request needs. Policy lives in `SKILL.md`; this file only describes the fields. The example below passes `validate_video_job.py` against a matching article.
 
 ```json
 {
@@ -134,7 +134,7 @@ One UTF-8 JSON file per video at `output/<job-id>/video-job.json`, written whole
 
 ## Shot fields you write
 
-Every shot: `index` (unique positive integer), `duration` (positive planning estimate, never a gate), `article_evidence` (an exact substring of `article.json` `body_text`), `factual_message`, `narration`, `subtitle` (same text as `narration`; may only normalize display notation), `visual_type` (`ai_image` or `data_table`), `image_ratio: "14:10"`, `audio_path`.
+Every shot: `index` (unique positive integer), `duration` (positive planning estimate, never a gate), `article_evidence` (a paragraph number such as `P3` / `P3-P5`, where a paragraph is one non-empty line of `body_text`, or an exact substring of `article.json` `body_text`), `factual_message`, `narration`, `subtitle` (same text as `narration`; may only normalize display notation), `visual_type` (`ai_image` or `data_table`), `image_ratio: "14:10"`, `audio_path`.
 
 - First shot: `opening_hook_type`; with `"application_address"` also `opening_applications` (1-4 applications from the article) and narration/subtitle starting `做{应用}的老板看过来，`.
 - Every later shot: a non-empty `narration_transition`.
@@ -146,7 +146,7 @@ Every shot: `index` (unique positive integer), `duration` (positive planning est
 ## Fields the scripts write (never edit by hand)
 
 - `prepare_tts_text.py`: `tts_text`, `subtitle_segments`, `audio.product_grade_spoken`.
-- `generate_job_audio.py`: `audio_hash`, `audio_status`, `asr_subtitle_segments`, `subtitle_timing_source`, `subtitle_sync_status`, `subtitle_sync_warning`, footer audio fields in `audio`.
+- `generate_job_audio.py`: `audio_hash`, `audio_status`, `asr_subtitle_segments` (the timed segments, whatever their source), `subtitle_timing_source` (`tts_word_timestamps`, `asr_sentence_timestamps` or `punctuation_duration_estimate`), `subtitle_sync_status`, `subtitle_sync_warning`, footer audio fields in `audio`; plus `audio/NNN.timestamps.json` next to each MP3 holding MiniMax's word timestamps for it.
 - `jianying_local_draft.py --verify-duration`: `duration_ms`, `actual_total_duration_seconds`, `actual_timeline_audio_hash`, `actual_duration_status`.
 - `generate_job_images.py`: `image_status`, `image_request_hash(es)`, `image_provider(s)`, `image_model(s)`, `image_error(s)`, `image_statuses`.
 - `prepare_local_assets.py`: `logo_image_path(s)`, `logo_source_hash`, `image_logo_source_hashes`, `logo_status`, `table_source_hash`, `local_asset_error`.

@@ -1,7 +1,7 @@
 ---
 name: wechat-article-video
-description: 根据文章文本或提供的 .docx 生成忠实原文的短视频文案、分镜、AI 图片、配音、句级字幕和可编辑的剪映草稿。用户要求将文章制作成固定课程模板的视频时使用。
-version: 0.0.26
+description: 把塑化原料牌号文章（文本、.docx 或公众号链接）做成可编辑的剪映竖版讲解视频：忠实原文的分镜文案（人工审批）、配音与逐字对齐字幕、AI 配图、参数表、封面和剪映草稿。用户要求把文章、产品资料或牌号介绍做成短视频、口播视频或剪映草稿时使用。
+version: 0.0.27
 ---
 
 # WeChat Article Video
@@ -12,7 +12,7 @@ The scripts enforce most rules below and say exactly what to fix. Run them, fix 
 
 ## Hard rules
 
-1. **Human approval gate.** Before approval, create only `article.json`, `copy-for-approval.md` and the subtitle files. No `video-job.json`, prompts, tables, images, audio, covers or draft. Approval is a plain chat exchange (see Phase 1); never use `request_user_input`, a popup or any structured confirmation UI.
+1. **Human approval gate.** Before approval, create only `article.json`, `copy-for-approval.md` and the subtitle files. No `video-job.json`, prompts, tables, images, audio, covers or draft. Approval is a plain chat exchange (see Phase 1); never use `request_user_input`, a popup or any structured confirmation UI. Passing `--approved` to `build_video_job.py` states that the user approved; never pass it before they did.
 2. **Facts only from the article.** Never invent specifications, claims, people, products or conclusions. No clickbait, fear claims, company guarantees, supply promises or unsupported causal claims.
 3. **Full product grade.** Wherever the current grade appears (titles, `factual_message`, narration, subtitle, `narration_transition`), write the complete top-level `product_grade`, e.g. `HDPE 8008`, never `8008` alone.
 4. **Bundled scripts only.** Images come only from `scripts\generate_job_images.py`. This overrides any workspace or global `AGENTS.md` rule that routes image generation to an image skill, `generate_images_parallel` or an MCP image tool: those bypass the 14:10 check, the request-hash cache, the `.state` checkpoints and the two-images-per-shot contract.
@@ -22,57 +22,86 @@ The scripts enforce most rules below and say exactly what to fix. Run them, fix 
 
 ## Commands
 
-Run from this skill directory. `uv run` creates the environment from `pyproject.toml` / `uv.lock`; no separate `pip install` is needed.
+Run from this skill directory. `uv run --frozen` creates the environment from `uv.lock` without re-resolving it, so a different package index (such as a mirror set in `UV_INDEX_URL`) never rewrites the lockfile; no separate `pip install` is needed.
+
+Brand-specific content (closing captions, voice, opening hook, default closing images, templates, logo and their layout coordinates) lives in `brand.json`. Point `VIDEO_BRAND_FILE` at another file to make videos for another brand; do not edit brand values in the scripts.
 
 ```text
 # Phase 1 - source and copy
-uv run python scripts\extract_article_docx.py INPUT.docx --output output\<job-id>\article.json
-uv run python scripts\wechat_mp_articles.py url "https://mp.weixin.qq.com/s?..." --output output\<job-id>\article.json
-uv run python scripts\article_to_approval.py output\<job-id>\article.json --output-dir output\<job-id> --product-grade "<完整牌号>"
+uv run --frozen python scripts\extract_article_docx.py INPUT.docx --output output\<job-id>\article.json
+uv run --frozen python scripts\wechat_mp_articles.py url "https://mp.weixin.qq.com/s?..." --output output\<job-id>\article.json
+uv run --frozen python scripts\article_paragraphs.py output\<job-id>\article.json
+uv run --frozen python scripts\article_to_approval.py output\<job-id>\article.json --output-dir output\<job-id> --product-grade "<完整牌号>"
 
-# Phase 2 - plan (after approval)
-uv run python scripts\validate_video_job.py output\<job-id> --seal-approval
-uv run python scripts\validate_video_job.py output\<job-id>
-uv run python scripts\validate_video_job.py output\<job-id> --complete-prompts
+# Phase 2 - plan (after approval): build, seal, complete prompts, validate
+uv run --frozen python scripts\build_video_job.py --job output\<job-id> --approved
 
-# Phase 3 - media
-uv run python scripts\prepare_tts_text.py --job output\<job-id>
-uv run python scripts\generate_job_audio.py --job output\<job-id>                # track A
-uv run python scripts\jianying_local_draft.py --job output\<job-id> --verify-duration   # track A, after audio
-uv run python scripts\generate_job_images.py --job output\<job-id> --max-concurrency 3  # track B
-uv run python scripts\prepare_local_assets.py --job output\<job-id>              # after both tracks
-uv run python scripts\jianying_local_draft.py --job output\<job-id>
+# Phase 3 - all media and the Jianying draft
+uv run --frozen python scripts\run_media.py --job output\<job-id>
 ```
 
-Tracks A and B may run at the same time, for example as two background commands; running them one after the other is also fine. Each stage writes only its own fields of `video-job.json` under a lock, so neither undoes the other. Running images before narration means a failed TTS stage can leave already-paid images; they are reused on the next run.
+`run_media.py` prepares the TTS text, runs narration (with word timestamps and the duration check) and image generation at the same time, then tables and Logo, then the Jianying draft, and prints a JSON result whose `summary` is ready to show the user. If a stage fails it names the stage and stops; fix the cause and rerun the same command: finished narration and images are reused, never paid twice. Images may finish before a failed narration stage, and those paid images are kept for the rerun.
 
-Only after a revision of approved copy, and before any image or draft work: `validate_video_job.py output\<job-id> --reset-audio-for-reapproval`, then reseal.
+The single stages remain available for debugging or a partial rerun: `prepare_tts_text.py --job`, `generate_job_audio.py --job`, `jianying_local_draft.py --job ... --verify-duration`, `generate_job_images.py --job ... --max-concurrency 3`, `prepare_local_assets.py --job`, `jianying_local_draft.py --job [--overwrite]`, and `validate_video_job.py output\<job-id> [--seal-approval | --complete-prompts]`.
+
+Only after a revision of approved copy, and before any image or draft work: `validate_video_job.py output\<job-id> --reset-audio-for-reapproval`, then rerun `build_video_job.py`.
 
 ## Execution discipline
 
 - Treat the job as a resumable state machine. Inspect `output/<job-id>/` once and continue from the first missing or stale artifact. Every stage skips work whose recorded hash still matches, so rerunning never pays twice.
 - Reuse an existing job for the same article and grade. When editing, change only the requested shot or field; never rebuild `video-job.json` from a template.
 - Run each command at most once. On failure, read the error, make one targeted fix and retry once; if it fails again, stop and report the command, the error and the blocking dependency. A network timeout counts as transient: rerun the same command once. Do not write wrapper, cleanup or orchestration scripts, and do not loop over quoting variants.
-- Write `article.json`, the copy and `video-job.json` as whole documents with structured file writes, never as echoed or appended fragments.
-- Credentials (`MINIMAX_API_KEY`, `DASHSCOPE_API_KEY`, image provider keys, WeChat settings) come from this skill's `.env`; existing process variables win, and parent `.env` files are never read. For image provider settings and errors, read `references/image-providers.md`.
+- Write `article.json`, the copy and `image-prompts.md` as whole documents with structured file writes, never as echoed or appended fragments. Do not hand-write `video-job.json`; `build_video_job.py` creates it.
+- Credentials come from this skill's `.env`; existing process variables win, and parent `.env` files are never read. `MINIMAX_API_KEY` is required for narration (optional `MINIMAX_GROUP_ID`; `MINIMAX_TTS_API=async` switches to the older endpoint without timestamps). `DASHSCOPE_API_KEY` is needed only for `wan` images and for the ASR fallback described in Phase 3. For image provider settings and errors, read `references/image-providers.md`.
 - Do not reread unchanged skill or reference files.
 
 ## Phase 1: copy for approval
 
 **Job and source.** Pick a unique job ID such as `YYYYMMDD-HHMMSS-<grade>` and keep everything for the run in `output/<job-id>/`. Store pasted text verbatim as `article.json` (`body_text`), or use the DOCX / WeChat URL command above. If WeChat serves a verification page, use the article text the user can see in a browser, or ask for a DOCX. To list or fetch the account's own published articles through the Official Account API, read `references/wechat-official-api.md`.
 
-**Copy file.** `copy-for-approval.md` holds the proposed title, the product grade, five fact-faithful title candidates (one marked recommended), and each shot under `### 镜头N` with its narration as the first paragraph (an optional `口播：` prefix; the paragraph may wrap over several lines), followed by its article evidence.
+**Copy file.** `copy-for-approval.md` is what the human approves and what `build_video_job.py` later reads, so it carries every planning decision in this fixed format:
+
+```markdown
+- **产品牌号**：HDPE 6094
+
+## 标题候选
+1. 做瓶盖周转箱的老板看过来：HDPE 6094（推荐）
+2. …（exactly five, one marked 推荐）
+
+### 镜头1
+做瓶盖、周转箱的老板看过来，HDPE 6094 是一款注塑级牌号。
+
+证据：HDPE 6094 适用于瓶盖、周转箱等注塑制品
+模块：介绍
+
+### 镜头2
+先看参数，HDPE 6094 的熔体流动速率是8 g/10min。
+
+证据：熔体流动速率 8 g/10min
+衔接：从应用场景转入支撑这些应用的物性参数
+表题：HDPE 6094 物性参数
+
+| 项目 | 数值 |
+|---|---|
+| 熔体流动速率 | 8 g/10min |
+```
+
+- The narration is the first paragraph under the heading (an optional `口播：` prefix; it may wrap over several lines). It becomes both the spoken text and the subtitle.
+- `证据：` cites the article: a paragraph number such as `P3` (or `P3-P5`) from `article-paragraphs.md`, which `article_to_approval.py` writes, or an exact excerpt copied character for character. Prefer paragraph numbers; they cannot be mistyped.
+- `模块：` is 介绍, 特性 or 应用, on every non-table shot or on none.
+- `衔接：` is required from the second shot on and says how the shot continues the previous one.
+- A Markdown table makes the shot a parameter table (`表题：` optional). `画面：参数表` or `画面：AI 配图` may also be set explicitly; without a table a shot is an AI-image shot.
 
 **Structure.**
 - 2-3 modules: introduction, core characteristics, applications. No processing-details, cross-grade comparison or generic summary module unless the user asks.
 - Each non-table module has two complementary shots: one broad context view and one different article-backed result or process view. Applications form one module of at most two shots; group related products and state a shared benefit once. Never repeat the same benefit across shots.
-- Budget: at most 7 shots, 3 table shots and 2 shots per module. Exceeding it needs `shot_budget` with a `reason` in `video-job.json`.
+- Budget: at most 7 shots, 3 table shots and 2 shots per module. Exceeding it needs the user's explicit request and `build_video_job.py --max-* N --budget-reason "<why>"`.
 - A shot is one narration plus its subtitles, not one image. An `ai_image` shot renders two images and a table shot one, plus two closing images. Report `镜头` and `图片` separately.
 - Order shots as the article is written. Table shots stay with the section that carries the data. Only an `application_address` opening may cite a later section.
 - Technical specifications go into 1-3 consecutive `data_table` shots of comparable parameters, at most five per table. That shot's narration names at most five parameters, copied exactly.
 
 **Narration.**
-- If the article names concrete applications, open with `做{1-4 个文章中的应用}的老板看过来，`, then the article-backed value and the full grade, e.g. `做瓶盖、周转箱、收纳盒的老板看过来，HDPE 8008……`. Otherwise use another evidence-backed hook.
+- If the article names concrete applications, open with the brand's application hook (`brand.json` `opening_hook`; by default `做{1-4 个文章中的应用}的老板看过来，`), then the article-backed value and the full grade, e.g. `做瓶盖、周转箱、收纳盒的老板看过来，HDPE 8008……`. Otherwise use another evidence-backed hook.
 - Write one continuous spoken explanation, then split it into shots. Each later shot continues, contrasts, explains or applies the previous point (recorded later as its `narration_transition`); do not restart with the grade or a headline sentence.
 - Use commas for connected clauses and a full stop only at the end of a complete thought. Keep each visible clause within 17 units (one Chinese character = 1 unit).
 - Write numbers as Arabic numerals with units: `断裂伸长率≥600%`, never `超六百`. Keep `低密度聚乙烯的注塑级牌号` (with `的`), with no punctuation between a category word and `牌号`.
@@ -89,13 +118,16 @@ Repeat until the report is clean.
 
 ## Phase 2: plan
 
-After approval, write `script.md` and `video-job.json` (fields: `references/video-job.md`) with `copy_approval.status: "approved"`, then:
+After approval, write `image-prompts.md`: under `### 镜头N` for every AI-image shot, two or more prompts, one per line (optionally `### 收尾1` / `### 收尾2` to replace the default closing images). Then run `build_video_job.py --job output\<job-id> --approved`. It:
 
-1. `--seal-approval` snapshots both approval files. Every later script rejects a changed or unapproved copy, and any change to them needs a new approval and a new seal.
-2. Run `validate_video_job.py`, the preflight gate. Fix the plan as a whole until it passes.
-3. If it reports image prompt problems, run `--complete-prompts` once. It appends the mandatory clauses below only where they are missing, leaves compliant prompts unchanged and revalidates. Prompts are outside the sealed approval, so no reapproval is needed.
+1. creates `video-job.json` (fields: `references/video-job.md`) and a readable `script.md` storyboard, copying narration and subtitles verbatim from the approved copy;
+2. seals both approval files (every later script rejects a changed or unapproved copy; any change needs a new approval);
+3. appends the mandatory prompt clauses below wherever a prompt lacks them, which needs no reapproval because prompts are outside the seal;
+4. runs the full preflight and prints `shots` and `planned_images`.
 
-**Image prompts** (`image_prompts`, two or more distinct complementary images per `ai_image` shot, each its own request; two new `closing_visuals`):
+It lists every missing input at once (evidence, transitions, prompts, titles) and writes nothing until they are fixed. If the user explicitly wants more than the default budget, add `--max-total N` / `--max-data-tables N` / `--max-per-module N` with `--budget-reason "<why>"`. Once media generation has started it refuses to rebuild the plan.
+
+**Image prompts** (two or more distinct complementary images per AI-image shot, each its own request; two new closing images):
 - include `14:10 horizontal composition`, and keep important subjects inside the central 90% with clean side margins;
 - add people only when the evidence needs them, and then `Chinese people only`, prohibiting foreign, Western, mixed-ethnicity and ambiguous faces (`no people` is fine);
 - plastic raw material only as `white semi-transparent plastic pellets`: no colored, black or opaque pellets, powder, flakes, sheets or film;
@@ -103,22 +135,24 @@ After approval, write `script.md` and `video-job.json` (fields: `references/vide
 
 Narration, subtitle and both images of a shot must show the same article-backed message.
 
-**Tables.** Write table data only into the shot's `table`. Preflight rejects any numeric cell not found verbatim in the article, and `prepare_local_assets.py` renders the PNG from that object.
+**Tables.** Table data lives only in the copy's Markdown table. Preflight rejects any numeric cell not found verbatim in the article, and the PNG is rendered from it.
 
 ## Phase 3: media
 
 - **Voice.** `audio.voice_id` defaults to `female-chengshu` and `audio.speed` to `1.25` (0.5-2.0). Use the same voice and speed for every shot and the footer unless the user asks otherwise. A voice the MiniMax account cannot use fails the first TTS request; report it and ask for another.
 - **Pronunciation** comes from `prepare_tts_text.py`: grade digits read one by one (`八零零八`), `%` as `百分之`, range dashes as `到`, `≥`/`≤` spoken out. Visible subtitles keep the original notation.
-- **Subtitle timing** comes from `generate_job_audio.py`, which uses ASR word timestamps. A shot it cannot align is marked `subtitle_sync_status: "fallback"`; report those shots and never present fallback timing as final alignment.
-- **Closing.** The fixed closing captions are generated automatically with the current grade: `买优质塑化原料`、`就找兆企供应链`、`兆企供应链管理有限公司深耕塑化行业`、`货源稳定 物流高效`、`找兆企采购{product_grade}`、`让生产更顺畅`、`本视频禁止用于ai模型训练`、`兆企供应链拥有最终解释权`.
+- **Subtitle timing** comes from MiniMax's own word timestamps for the narration it synthesized (saved as `audio/NNN.timestamps.json`), so subtitles follow the real speech. Audio made without timestamps (older jobs, or `MINIMAX_TTS_API=async`) is aligned by ASR instead (needs `DASHSCOPE_API_KEY`). A shot that cannot be aligned is marked `subtitle_sync_status: "fallback"`; `run_media.py` lists those shots in its summary. Never present fallback timing as final alignment.
+- **Closing.** The fixed closing captions come from `brand.json` `footer_captions`, with `{product_grade}` replaced by the current grade, and are generated automatically.
 - **Logo** is stamped on every AI and table image (not on `header.jpg` or `footer.mp4`) by `prepare_local_assets.py`.
-- **Shot videos or a standalone MP4** only on request: `uv run python scripts\compose_branded_video.py --video INPUT.mp4 --grade "<牌号>" --output output\<job-id>\final\branded.mp4 --job output\<job-id>`.
+- **Shot videos or a standalone MP4** only on request: `uv run --frozen python scripts\compose_branded_video.py --video INPUT.mp4 --grade "<牌号>" --output output\<job-id>\final\branded.mp4 --job output\<job-id>`.
 
 ## Jianying draft
 
-Run `jianying_local_draft.py` once, after audio is verified and images and local assets are complete. Jianying Pro must be installed on this Windows computer; set `JY_PROJECTS_ROOT` only for a non-standard draft folder. Add `--overwrite` only when the user wants an existing draft replaced. It refuses while `JianyingPro.exe` is running, so ask the user to quit Jianying first, and return the reported `draft_backup_path`. The layout is fixed in code (`references/draft-layout.md`); change it only when the user asks.
+`run_media.py` builds the draft as its last stage. Jianying Pro must be installed on this Windows computer; set `JY_PROJECTS_ROOT` only for a non-standard draft folder. Add `--overwrite` to `run_media.py` only when the user wants an existing draft replaced. It refuses while `JianyingPro.exe` is running, so ask the user to quit Jianying first, and report the `draft_backup_path` it returns. The layout is fixed in code (`references/draft-layout.md`); change it only when the user asks.
 
 ## Final response
+
+Show the `summary` text from `run_media.py`'s result as is. It already contains, in this order:
 
 - `封面：` the absolute path of `final/cover.jpg`, and `横版封面：` the absolute path of `final/landscape-cover.png`, listed separately (they are deliverables, not timeline clips);
 - `文案：` the approved copy path, then the Jianying draft path (plus `draft_backup_path` if any) and the other asset paths;

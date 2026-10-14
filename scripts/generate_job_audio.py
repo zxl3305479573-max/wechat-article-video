@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from audio_manager import AudioManager
+from brand import load_brand
 from job_store import save_plan_job
 from prepare_tts_text import prepare_job, prepare_text
 from subtitle_timing import split_timeline_segments
@@ -23,7 +24,7 @@ from video_constants import FOOTER_CAPTIONS
 import imageio_ffmpeg
 
 
-DEFAULT_TTS_SPEED = 1.25
+DEFAULT_TTS_SPEED = load_brand().speed
 STATE_DIRECTORY = "audio/.state"
 # Bump when the ASR-to-subtitle alignment changes so cached fallback states are
 # re-evaluated instead of being reused.
@@ -285,10 +286,53 @@ def align_asr_sentence_boundaries(
     return aligned
 
 
+TTS_TIMESTAMP_SUFFIX = ".timestamps.json"
+
+
+def tts_timestamp_path(audio_path: Path) -> Path:
+    """`audio/001.mp3` keeps its word timestamps in `audio/001.timestamps.json`."""
+    return audio_path.with_name(audio_path.stem + TTS_TIMESTAMP_SUFFIX)
+
+
+def save_tts_timestamps(audio_path: Path, audio_fingerprint: str, segments: list[dict[str, Any]] | None) -> None:
+    """Store the TTS word timestamps next to their MP3, keyed by its audio hash."""
+    path = tts_timestamp_path(audio_path)
+    if not segments:
+        path.unlink(missing_ok=True)  # never leave timestamps of an older MP3
+        return
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps({"audio_hash": audio_fingerprint, "segments": segments}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def load_tts_timestamps(audio_path: Path, audio_fingerprint: str) -> list[dict[str, Any]] | None:
+    """Return saved TTS timestamps only if they belong to this exact MP3."""
+    try:
+        value = json.loads(tts_timestamp_path(audio_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict) or value.get("audio_hash") != audio_fingerprint:
+        return None
+    segments = value.get("segments")
+    return segments if isinstance(segments, list) and segments else None
+
+
 def sync_subtitles(shot: dict[str, Any], audio_path: Path) -> None:
-    """Use ASR sentence boundaries when available; preserve original visible text."""
+    """Time each authored subtitle segment from measured speech.
+
+    The TTS engine's own word timestamps are used when they were saved with
+    this MP3; ASR on the MP3 is the fallback (e.g. audio made before the
+    timestamps existed). Either way the visible text stays as authored.
+    """
     visible_sentences = subtitle_sentences(shot)
-    segments = AudioManager().extract_audio_text(str(audio_path))
+    segments = load_tts_timestamps(audio_path, str(shot.get("audio_hash") or ""))
+    timing_source = "tts_word_timestamps"
+    if segments is None:
+        segments = AudioManager().extract_audio_text(str(audio_path))
+        timing_source = "asr_sentence_timestamps"
     if not isinstance(segments, list) or not segments:
         use_estimated_subtitle_timing(shot, "ASR returned no usable sentences")
         return
@@ -358,7 +402,7 @@ def sync_subtitles(shot: dict[str, Any], audio_path: Path) -> None:
         {"text": text, "start_ms": start, "end_ms": end}
         for text, start, end in zip(visible_sentences, boundaries, ends)
     ]
-    shot["subtitle_timing_source"] = "asr_sentence_timestamps"
+    shot["subtitle_timing_source"] = timing_source
     shot["subtitle_sync_status"] = "completed"
     shot.pop("subtitle_sync_warning", None)
 
@@ -408,7 +452,7 @@ def generate(job_dir: Path, sync: bool) -> dict[str, Any]:
     validate(job_path)
     job = load_job(job_path)
     audio = job["audio"]
-    voice_id = str(audio.get("voice_id") or "female-chengshu")
+    voice_id = str(audio.get("voice_id") or load_brand().voice_id)
     speed = float(audio.get("speed", DEFAULT_TTS_SPEED))
     product_grade = str(job["product_grade"])
     jobs: list[tuple[dict[str, Any], str, Path, str]] = []
@@ -505,7 +549,8 @@ def generate(job_dir: Path, sync: bool) -> dict[str, Any]:
 
     def create(item: tuple[dict[str, Any], str, Path, str]) -> tuple[dict[str, Any], Path, str]:
         shot, text, path, fingerprint = item
-        AudioManager().generate_audio(text, str(path), voice_id, speed)
+        segments = AudioManager().synthesize(text, str(path), voice_id, speed)
+        save_tts_timestamps(path, fingerprint, segments)
         return shot, path, fingerprint
 
     def create_footer_segment(text: str, path: Path) -> Path:

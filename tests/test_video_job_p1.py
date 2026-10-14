@@ -7,7 +7,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -865,3 +865,46 @@ class ProviderRetryAndSpeechTests(unittest.TestCase):
 
     def test_comparison_signs_are_spoken(self):
         self.assertEqual(prepare_text("断裂伸长率≥600%，灰分≤0.05%", "PP Z30S"), "断裂伸长率大于等于百分之600，灰分小于等于百分之0.05")
+
+
+class TtsTimestampTests(unittest.TestCase):
+    def test_saved_tts_word_timestamps_are_used_instead_of_asr(self):
+        words = [
+            {"text": "第一", "begin_ms": 100, "end_ms": 600},
+            {"text": "句", "begin_ms": 600, "end_ms": 900},
+            {"text": "第二句", "begin_ms": 1300, "end_ms": 2000},
+        ]
+        asr = Mock(side_effect=AssertionError("ASR must not run when TTS timestamps exist"))
+        fake_audio_manager = type("AudioManager", (), {"extract_audio_text": lambda self, path: asr()})
+        with tempfile.TemporaryDirectory() as temporary:
+            audio = Path(temporary) / "001.mp3"
+            audio.write_bytes(b"mp3")
+            generate_job_audio.save_tts_timestamps(audio, "hash-1", [{"text": "第一句，第二句", "begin_ms": 100, "end_ms": 2000, "words": words}])
+            shot = {"subtitle": "第一句，第二句", "subtitle_segments": ["第一句，", "第二句"], "tts_text": "第一句，第二句", "audio_hash": "hash-1"}
+            with patch.object(generate_job_audio, "AudioManager", fake_audio_manager), patch.object(generate_job_audio, "measured_audio_duration_ms", return_value=2100):
+                generate_job_audio.sync_subtitles(shot, audio)
+        self.assertEqual(shot["subtitle_timing_source"], "tts_word_timestamps")
+        self.assertEqual(
+            [(item["start_ms"], item["end_ms"]) for item in shot["asr_subtitle_segments"]],
+            [(0, 900), (1300, 2100)],
+        )
+
+    def test_timestamps_of_a_different_mp3_are_ignored(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            audio = Path(temporary) / "001.mp3"
+            generate_job_audio.save_tts_timestamps(audio, "old-hash", [{"text": "x", "begin_ms": 0, "end_ms": 1, "words": []}])
+            self.assertIsNone(generate_job_audio.load_tts_timestamps(audio, "new-hash"))
+            generate_job_audio.save_tts_timestamps(audio, "new-hash", None)
+            self.assertFalse(generate_job_audio.tts_timestamp_path(audio).exists())
+
+    def test_draft_uses_tts_timed_segments(self):
+        shot = {
+            "subtitle": "第一句，第二句。",
+            "subtitle_timing_source": "tts_word_timestamps",
+            "asr_subtitle_segments": [
+                {"text": "第一句，", "start_ms": 0, "end_ms": 900},
+                {"text": "第二句。", "start_ms": 1300, "end_ms": 2000},
+            ],
+        }
+        parts = jianying_local_draft.subtitle_parts_for_shot(shot, 2_000_000)
+        self.assertEqual([(start, duration) for _text, start, duration in parts], [(0, 1_300_000), (1_300_000, 700_000)])

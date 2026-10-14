@@ -1,6 +1,8 @@
 # Jianying Draft Layout
 
-`scripts/jianying_local_draft.py` builds this layout; nothing here is set by hand. Read this file only when the user asks to change the template, or to check a finished draft. Change the constants in the script, not the generated draft.
+`scripts/jianying_local_draft.py` builds this layout; nothing here is set by hand. Read this file only when the user asks to change the template, or to check a finished draft.
+
+Brand-dependent values come from `brand.json` (or the file named by `VIDEO_BRAND_FILE`): the template, cover and footer files and the logo under `assets`, and under `layout` the template's transparent `video_window`, the 14:10 `image_frame`, the inspector Y of the subtitles (`subtitle_y`) and of the grade text (`header_grade_y`), and the cover regions. A new template must come with its own coordinates there. Style constants that do not depend on the brand (subtitle size, colors, blur, scale, transitions) stay in the script. Never edit a generated draft instead.
 
 ## Canvas and tracks
 
@@ -17,8 +19,8 @@
 
 ## Text
 
-- Subtitles: one line per timeline segment, Jianying `SourceHanSansCN-Regular`, size `9`, inspector `x=0`, `y=-938` (stored as `-938/1920`), fill `#F2EADD`, outline `#4B4B45`, `auto_wrapping` off, `max_line_width = 1.00`, in the blurred band below the image.
-- `HeaderGrade`: the current `product_grade` as an independent editable text segment, `SourceHanSerifCN-Regular`, black, size `26`, inspector `x=0`, `y=-1353` (stored as `-1353/1920`).
+- Subtitles: one line per timeline segment, Jianying `SourceHanSansCN-Regular`, size `9`, inspector `x=0`, `y=-938` by default (`layout.subtitle_y`, stored as `-938/1920`), fill `#F2EADD`, outline `#4B4B45`, `auto_wrapping` off, `max_line_width = 1.00`, in the blurred band below the image.
+- `HeaderGrade`: the current `product_grade` as an independent editable text segment, `SourceHanSerifCN-Regular`, black, size `26`, inspector `x=0`, `y=-1353` by default (`layout.header_grade_y`, stored as `-1353/1920`).
 - Rendered (non-draft) text uses the bundled SIL Open Font License `assets/fonts/SourceHanSansSC-Regular.otf`.
 
 ## Audio and timing

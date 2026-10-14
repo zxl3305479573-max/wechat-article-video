@@ -1,0 +1,44 @@
+{
+  "name": "兆企供应链",
+  "footer_captions": [
+    "买优质塑化原料",
+    "就找兆企供应链",
+    "兆企供应链管理有限公司深耕塑化行业",
+    "货源稳定 物流高效",
+    "找兆企采购{product_grade}",
+    "让生产更顺畅",
+    "本视频禁止用于ai模型训练",
+    "兆企供应链拥有最终解释权"
+  ],
+  "voice": {
+    "voice_id": "female-chengshu",
+    "speed": 1.25
+  },
+  "opening_hook": {
+    "prefix": "做",
+    "suffix": "的老板看过来"
+  },
+  "closing_image_prompts": [
+    "14:10 horizontal composition, photorealistic clean quality-control laboratory, sample trays of white semi-transparent plastic pellets on a bench, no colored, black, or opaque pellets, no powder, flakes, sheets, or film, no people, no visible text",
+    "14:10 horizontal composition, photorealistic organized logistics warehouse with neatly stacked sealed white sacks on pallets and a truck at the loading dock, wide view, no people, no visible text"
+  ],
+  "assets": {
+    "logo": "assets/logo.png",
+    "template_overlay": "assets/header.jpg",
+    "cover_template": "assets/header1.jpg",
+    "landscape_cover_template": "assets/header2.png",
+    "footer_video": "assets/footer.mp4"
+  },
+  "layout": {
+    "video_window": [0, 488, 1080, 1485],
+    "image_frame": [0, 588, 1080, 1359],
+    "grade_region": [105, 1535, 975, 1755],
+    "subtitle_y": -938,
+    "header_grade_y": -1353,
+    "mp4_subtitle_baseline_y": 1415,
+    "cover_image_region": [0.068, 0.332, 0.932, 0.724],
+    "cover_grade_region": [0.12, 0.754, 0.88, 0.862],
+    "cover_grade_font_scale": 0.82,
+    "landscape_grade_region": [0.09, 0.52, 0.91, 0.66]
+  }
+}

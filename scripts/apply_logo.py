@@ -8,8 +8,10 @@ from pathlib import Path
 
 from PIL import Image
 
+from brand import load_brand
 
-DEFAULT_LOGO = Path(__file__).resolve().parents[1] / "assets" / "logo.png"
+
+DEFAULT_LOGO = load_brand().assets["logo"]
 
 
 def apply_logo(image_path: Path, output_path: Path, logo_path: Path = DEFAULT_LOGO) -> None:

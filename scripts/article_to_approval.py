@@ -15,6 +15,7 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Inches, Pt, RGBColor
 
+from article_paragraphs import render as render_paragraphs
 from subtitle_timing import (
     SUBTITLE_MAX_WIDTH_UNITS,
     display_text,
@@ -52,7 +53,16 @@ def require_unapproved_copy(job_path: Path, removed_shots: list[int]) -> None:
         )
 
 
-NARRATION_METADATA_PREFIXES = ("证据：", "文章依据：", "文章证据：", "数据表", "---", "字幕分段")
+# Labelled lines a shot block may carry besides its narration. They are read
+# by build_video_job.py and must never become part of the spoken narration.
+COPY_FIELD_LABELS = ("证据", "文章依据", "文章证据", "模块", "画面", "衔接", "表题")
+NARRATION_METADATA_PREFIXES = (
+    *(f"{label}{colon}" for label in COPY_FIELD_LABELS for colon in "：:"),
+    "数据表",
+    "---",
+    "字幕分段",
+    "|",
+)
 NARRATION_MARKUP_PREFIXES = ("- ", "**", "##", "#")
 
 
@@ -393,6 +403,8 @@ def main() -> int:
     atomic_write(destination, content)
     docx_destination = output_dir / "subtitle-for-approval.docx"
     render_subtitles_docx(docx_destination, str(article.get("title") or "").strip(), args.product_grade.strip(), shots)
+    # Paragraph numbers let `证据：` cite P3 instead of a hand-copied quote.
+    atomic_write(output_dir / "article-paragraphs.md", render_paragraphs(str(article.get("body_text") or "")))
     print(json.dumps({
         "output": str(destination),
         "docx_output": str(docx_destination),

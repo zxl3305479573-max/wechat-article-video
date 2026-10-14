@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from brand import load_brand
 from job_store import save_plan_job
 from subtitle_timing import split_timeline_segments
 
@@ -161,8 +162,8 @@ def prepare_job(job_path: Path) -> dict[str, int]:
     if not product_grade:
         raise ValueError("video-job.json must contain product_grade")
     audio_config = job.get("audio") if isinstance(job.get("audio"), dict) else {}
-    voice_id = str(audio_config.get("voice_id") or "female-chengshu")
-    speed = float(audio_config.get("speed", 1.25))
+    voice_id = str(audio_config.get("voice_id") or load_brand().voice_id)
+    speed = float(audio_config.get("speed", load_brand().speed))
 
     changed = 0
     stale_audio = 0
